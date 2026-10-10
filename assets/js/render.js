@@ -141,7 +141,8 @@
   /* ---------- 创建 DOM ---------- */
   function createEl(item) {
     var el = document.createElement('div');
-    el.className = 'card';
+    // card--gen 用来把生成卡的排版收紧（媒体当主体、参数区压缩）
+    el.className = item.kind === 'asset' ? 'card card--asset' : 'card card--gen';
     el.dataset.id = item.id;
     el.dataset.kind = item.kind;
     el.innerHTML = item.kind === 'asset' ? assetShell() : genShell(item);
@@ -208,8 +209,11 @@
         '</div>' +
         '<div class="card__row">' +
           '<select class="card__sel" data-k="style"></select>' +
-          (isVideo ? '<select class="card__sel" data-k="duration"></select>' : '') +
+          (isVideo ? '<select class="card__sel" data-k="resolution"></select>' : '') +
         '</div>' +
+        (isVideo ? '<div class="card__row">' +
+          '<select class="card__sel" data-k="duration"></select>' +
+        '</div>' : '') +
         '<div data-refslot></div>' +
         '<div class="card__action">' +
           '<button class="btn btn--primary" data-act="generate" type="button">' +
@@ -249,7 +253,10 @@
 
   function updateAsset(el, item) {
     var img = el.querySelector('[data-media]');
-    if (img.getAttribute('src') !== item.src) img.setAttribute('src', item.src || '');
+    // 优先级：本地 IndexedDB 的 blob > 文档里的旧 dataURL > 云端地址
+    // remoteUrl 是「从历史放回画布」用的：图不下载到本地，直接用中转站的云端地址。
+    var url = (FC.assets && FC.assets.urlOf(item.id)) || item.src || item.remoteUrl || '';
+    if (img.getAttribute('src') !== url) img.setAttribute('src', url);
     img.alt = item.name || '';
     var name = el.querySelector('[data-name]');
     if (name.textContent !== item.name) name.textContent = item.name || '';
@@ -266,7 +273,10 @@
     fillSelect(el.querySelector('[data-k="model"]'), def.models, item.model);
     fillSelect(el.querySelector('[data-k="ratio"]'), def.ratios, item.ratio);
     fillSelect(el.querySelector('[data-k="style"]'), def.styles, item.style);
-    if (isVideo) fillSelect(el.querySelector('[data-k="duration"]'), def.durations, item.duration);
+    if (isVideo) {
+      fillSelect(el.querySelector('[data-k="duration"]'), def.durations, item.duration);
+      fillSelect(el.querySelector('[data-k="resolution"]'), def.resolutions, item.resolution);
+    }
 
     // 提示词（不要打断正在输入的文本框）
     var ta = el.querySelector('[data-k="prompt"]');
@@ -350,22 +360,73 @@
         : art.dataURL(res.seed, res.w, res.h);
     }
 
-    var html = '<img src="' + esc(src) + '" alt="" draggable="false">';
-    if (item.kind === 'video-gen' || res.kind === 'video') {
-      html += '<button class="stage__play" data-act="play" type="button" title="播放">' +
-        '<svg class="ico"><use href="#i-play"/></svg></button>';
-      html += '<span class="stage__time">' + esc(item.duration || '5 秒') + '</span>';
+    // 先决定用哪个标签 —— 这一步必须在写 innerHTML 之前定下来。
+    // 之前是先写 <img src="xxx.mp4"> 再补救着换成 <video>，结果那个 <img>
+    // 加载 mp4 必然失败，error 先触发，"图片加载失败" 就盖在成功的视频上了。
+    //
+    // 判断依据是 res.kind（后端明确标了 'video'），不要靠 URL 后缀猜 ——
+    // blob: / 没有扩展名的地址也一样是视频，靠后缀会漏掉。
+    // 演示模式（没有 res.src，用 seed 画的静帧）仍然是图。
+    var isVideoRes = (item.kind === 'video-gen' || res.kind === 'video');
+    var useVideoTag = isVideoRes && !!res.src;
+
+    var html;
+    if (useVideoTag) {
+      // 真视频：<video> 直接内嵌，静音 + 循环，鼠标悬停就动
+      html = '<video src="' + esc(src) + '" muted loop playsinline preload="metadata"' +
+        ' data-preview="1"></video>' +
+        '<button class="stage__play" data-act="play" type="button" title="播放">' +
+          '<svg class="ico"><use href="#i-play"/></svg>' +
+        '</button>' +
+        '<span class="stage__time">' + esc(item.duration || '5 秒') + '</span>';
+    } else {
+      html = '<img src="' + esc(src) + '" alt="" draggable="false">';
+      if (isVideoRes) {
+        html += '<button class="stage__play" data-act="play" type="button" title="播放">' +
+          '<svg class="ico"><use href="#i-play"/></svg></button>';
+        html += '<span class="stage__time">' + esc(item.duration || '5 秒') + '</span>';
+      }
     }
     if (res.demo) html += '<span class="stage__badge">DEMO</span>';
     stage.innerHTML = html;
 
-    // 真实视频 URL：用 <video>
-    if (res.src && res.kind === 'video') {
-      stage.innerHTML = '<video src="' + esc(res.src) + '" muted loop playsinline></video>' +
-        '<button class="stage__play" data-act="play" type="button" title="播放">' +
-        '<svg class="ico"><use href="#i-play"/></svg></button>' +
-        '<span class="stage__time">' + esc(item.duration || '5 秒') + '</span>' +
-        (res.demo ? '<span class="stage__badge">DEMO</span>' : '');
+    // 悬停预览：鼠标移上去就播，移开就停并回到第一帧
+    var vid = stage.querySelector('video[data-preview]');
+    if (vid) {
+      vid.addEventListener('mouseenter', function () {
+        var p = vid.play();
+        if (p && p['catch']) p['catch'](function () { /* 自动播放被拦，忽略 */ });
+      });
+      vid.addEventListener('mouseleave', function () {
+        vid.pause();
+        try { vid.currentTime = 0; } catch (e) { /* ignore */ }
+      });
+      // 点一下也能播/停（手机上没有 hover）
+      vid.addEventListener('click', function () {
+        if (vid.paused) { var q = vid.play(); if (q && q['catch']) q['catch'](function () {}); }
+        else { vid.pause(); }
+      });
+    }
+
+    // 加载失败兜底。只有真拿不到媒体时才显示，而且文案要区分图和视频。
+    var media = stage.querySelector('img, video');
+    if (media && res.src) {
+      media.addEventListener('error', function () {
+        if (stage._broken) return;
+        stage._broken = true;
+        var what = isVideoRes ? '视频' : '图片';
+        var hint = isVideoRes
+          ? '生成成功了，但视频文件拉不下来。中转站的图床会过期，也可能只是临时挂了。'
+          : '生成成功了，但中转站的图床连不上。';
+        stage.innerHTML =
+          '<div class="stage__broken">' +
+            '<svg class="ico"><use href="#i-close"/></svg>' +
+            '<span>' + what + '加载失败</span>' +
+            '<small>' + hint + '<br>地址：' + esc(String(res.src).slice(0, 60)) + '…</small>' +
+            '<button class="btn btn--sm" data-act="generate" type="button">重新生成</button>' +
+          '</div>';
+        FC.ui.toast(what + '加载失败（图床可能挂了）', 'i-close');
+      });
     }
   }
 
@@ -380,29 +441,29 @@
       return;
     }
 
-    var incoming = Store.doc.links.filter(function (l) { return l.to === item.id; });
-    var key = incoming.map(function (l) { return l.id + ':' + l.from; }).join(',') || 'none';
+    var refs = Store.refsOf(item.id);
+    var key = refs.map(function (r) { return r.linkId + ':' + r.assetId + ':' + r.role + ':' + r.handle; }).join(',') || 'none';
     if (slot._key === key) return;
     slot._key = key;
 
-    if (!incoming.length) {
+    if (!refs.length) {
       slot.className = '';
       slot.innerHTML = '';
       return;
     }
 
     slot.className = 'card__inputs';
-    slot.innerHTML = incoming.map(function (l) {
-      var src = Store.get(l.from);
-      if (!src) return '';
-      var def = Store.kindDef(src.kind);
-      var thumb = src.kind === 'asset'
-        ? '<img src="' + esc(src.src) + '" alt="">'
-        : '<svg class="ico"><use href="#' + def.icon + '"/></svg>';
-      var label = src.kind === 'asset' ? (src.name || '图片') : def.short;
+    slot.innerHTML = refs.map(function (r) {
+      var url = (FC.assets && FC.assets.urlOf(r.assetId)) || '';
+      var thumb = url
+        ? '<img src="' + esc(url) + '" alt="">'
+        : '<svg class="ico"><use href="#i-image"/></svg>';
       return '<div class="inputchip">' + thumb +
-        '<span>来自 ' + esc(label) + '</span>' +
-        '<button data-act="unlink" data-link="' + esc(l.id) + '" type="button" title="断开连接">' +
+        '<span class="inputchip__handle">@' + esc(r.handle) + '</span>' +
+        '<button class="inputchip__role" data-act="role" data-link="' + esc(r.linkId) + '"' +
+          ' type="button" title="' + esc(FC.ROLE_HINT[r.role] || '') + '">' + esc(r.role) + '</button>' +
+        '<button class="inputchip__x" data-act="unlink" data-link="' + esc(r.linkId) + '"' +
+          ' type="button" title="断开连接">' +
         '<svg class="ico"><use href="#i-close"/></svg></button></div>';
     }).join('');
   }

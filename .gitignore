@@ -21,6 +21,9 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-error.log*
 
+# ---- 本地私有配置（密钥在这里，绝对不要提交）----
+config.local.js
+
 # ---- 本地环境变量（将来接后端时别把密钥传上来）----
 .env
 .env.local
@@ -30,3 +33,9 @@ yarn-error.log*
 
 # ---- 本地预览产物（可选：不想把截图传上去就把下面几行取消注释）----
 # preview-*.png
+# OSS 配置（含 AccessKey，绝不能提交）
+config.oss.local.py
+__pycache__/
+*.pyc
+# 速创 API 密钥
+config.wuyinkeji.local.py

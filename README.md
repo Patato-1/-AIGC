@@ -22,6 +22,8 @@
 | **拉连线** | 按住卡片边缘的**小圆点**拖到另一张卡，松开即连上（图片卡右侧只有输出，模型卡左右都有） |
 | **删连线** | 点一下线选中，再按 `Delete`；或点线中间的圆形 × |
 | **当参考图** | 把图片直接拖到模型卡上，松开即连成输入（等价于拉一条线） |
+| **改角色** | 输入条上点角色标签循环切换：参考 → 主体 → 风格 → 首帧 → 尾帧 |
+| **在提示词里 @** | 输入框里打 `@` 弹出候选（只列连进来的图），↑↓ 选、回车确认；例如「@雪山清晨 的色调，@人物特写 作为主体」 |
 | **框选** | **空白处按住拖拽**即可拉出选择矩形（跟随鼠标，右下角实时显示选中数量）；按住 `Shift`/`⌘` 拖拽 = 追加到已有选择 |
 | **平移 / 缩放** | **空格 + 拖拽** / 中键拖拽 / 切到平移工具 · `⌘/Ctrl + 滚轮` 或触控板捏合缩放 · 双指滚动平移 |
 | **复制 / 粘贴** | `⌘C` 复制 · `⌘X` 剪切 · `⌘V` 粘贴到**当前鼠标位置**（整组左上角对齐鼠标、往下 8px；卡片之间的相对位置保持不变）。鼠标不动连按 ⌘V 会依次错开 34px |
@@ -59,6 +61,35 @@
 
 画布本身仍然是自由摆放的 —— 连线只是"这两张卡有关系"的记号，不强制顺序，也没有节点图那种必须先摆好再跑的结构。
 
+
+## 在提示词里 @ 图片（全能参考）
+
+连进卡片的图会得到一个**短名**（取图片名，重名自动加序号）：`风景.png` → `@风景`。
+
+在提示词框里打 `@`，会弹出候选列表（**只列已经连到这张卡的图**）：
+
+- `↑` `↓` 选择，`回车` / `Tab` 确认，`Esc` 取消
+- 也可以鼠标点选
+- 确认后会插入 `@短名 `，光标停在后面
+
+**每张图还有个「角色」**，点输入条上的角色标签循环切换：
+
+| 角色 | 意思 |
+|---|---|
+| 参考 | 当作一般参考图 |
+| 主体 | 保持这张图里的主体 / 人物一致 |
+| 风格 | 沿用这张图的画风 / 色调 |
+| 首帧 | 视频从这里开始 |
+| 尾帧 | 视频到这里结束 |
+
+**不 @ 也不会丢图**：
+
+- 一条都没 @ → 连进来的图**全部**当普通参考（和以前行为一致）
+- @ 了某几张 → 只传被 @ 的那些
+- @ 了一个不存在的名字 → 退回「全部当参考」
+
+这些信息和角色会一起提交给后端（`refs` 数组）。**具体怎么发给中转站**（base64 / URL / file_id）在 `api.js` 里做映射 —— 那是接接口时要填的部分。
+
 ## 现在的生成是「演示模式」
 
 `api.js` 里 `USE_MOCK = true`，生成走本地：**不联网**，按提示词算出一个 seed，用 `art.js` 程序化画一张黑白抽象图。
@@ -71,73 +102,222 @@
 
 ---
 
-## 接入真实 API
+## 接入真实 API（已接 Grsai 中转站）
 
-所有网络访问都收在 `assets/js/api.js`，**其它文件一行都不用改**。
+所有网络访问都收在 `assets/js/api.js`。
 
-### 第一步：切开关
+### 配置放哪：config.local.js
+
+密钥**不要**写进 `api.js`（那个文件会提交到 GitHub）。复制模板：
+
+```
+config.example.js   →  复制成  config.local.js
+```
+
+然后填 `config.local.js`：
 
 ```js
-var CONFIG = {
-  USE_MOCK: false,                              // ← 改成 false
-  BASE_URL: 'https://api.your-domain.com/api',  // ← 你的后端
-  TOKEN_KEY: 'aic.token.v1',
-  TIMEOUT: 20000
+window.FC.LOCAL = {
+  USE_MOCK: false,
+  BASE_URL: 'https://grsai.dakka.com.cn',   // 国内直连；国外用 https://grsaiapi.com
+  API_KEY: 'sk-你的密钥',                    // https://grsai.ai/zh/dashboard/api-keys
+  IMAGE_MODE: 'base64',
+  MODELS: { image: 'gpt-image-2', video: 'minimax-h3' }
 };
 ```
 
-登录后写入令牌，请求会自动带 `Authorization: Bearer <token>`：
+`config.local.js` 已在 `.gitignore` 里，**不会上传**。
 
-```js
-FC.api.setToken('your-jwt-token');
+### Grsai 接口长什么样
+
+```
+提交:  POST {BASE_URL}/v1/api/generate
+查询:  GET  {BASE_URL}/v1/api/result?id={id}
+认证:  Authorization: Bearer sk-xxx
+
+返回:  { id, status, progress, results:[{url}], error }
+状态:  running 进行中 / succeeded 成功 / violation 违规 / failed 失败
 ```
 
-### 第二步：实现这些接口
+**用 `replyType: "async"` 而不是 `"json"`**：只有 async 会返回 `progress`，卡片上的进度条能直接用；而且长任务不会把 HTTP 请求拖到超时。
 
-**画布文档**
+生图的参考图放在 `images` 数组里，文档明确写了「**支持 base64 与 url 链接**」，两种都行。
 
-| 方法 | 端点 | 说明 |
+### 模型与参数的坑
+
+| | 生图 | 视频 |
 |---|---|---|
-| `listBoards()` | `GET /boards` | 画布列表 |
-| `getBoard(id)` | `GET /boards/:id` | 读取画布 |
-| `createBoard(doc)` | `POST /boards` | 新建 |
-| `updateBoard(id, doc)` | `PUT /boards/:id` | 全量保存（自动保存走这里） |
-| `deleteBoard(id)` | `DELETE /boards/:id` | 删除 |
-| `ping()` | `GET /health` | 健康检查 |
+| 模型 | `gpt-image-2` `gpt-image-2.5` `gpt-image-2-vip` `nano-banana-2` … | `minimax-h3` |
+| 比例 | `auto` / `1:1` / `16:9` … 或像素值 `1024x1024` | **只认 `landscape` / `portrait`** |
+| 质量 | gpt-image-2 与 2.5 **只有 `auto`** | — |
+| 其他 | 2.5 不支持 `background` / `mask`（vip / flare / sunburst 才有） | `resolution` 480p/768p/1080p；`duration` 整数 1~15；1080p 最多 10 秒 |
 
-**生成**
+比例写法在 `api.js` 的 `normalizeRatio()` 里统一转换 —— 界面上你看到的是 `16:9`，发出去会自动变成 `landscape`。
+
+### 实测数据（2026-10）
+
+| 模型 | 结果 | 耗时 | 价格 |
+|---|---|---|---|
+| `gpt-image-2` | ✅ | ~33 秒 | ¥0.03/次 |
+| `gpt-image-2.5` | ✅ | ~4 分钟（明显更慢） | ¥0.03/次 |
+
+**日常用 `gpt-image-2`**，2.5 慢很多但价格一样。
+
+### 中转站的两个已知问题（不是我们的 bug）
+
+1. **图床不稳定 / 图片会过期**：Grsai 返回的图存在它的图床（`fileN.aitohumanize.com`）。实测这些图**过几个钟头就 404 了**，而且部分节点（如 `file2`）证书有问题 / 连不上。所以：
+   - 需要长期保存的图，用画布的「上传到云端」转存到你自己的 OSS（见下节）
+   - 卡片上做了兜底：图片加载失败时显示「图片加载失败 + 重新生成」，不是一片空白
+2. **任务偶尔卡死**：遇到过任务停在 `progress: 2` 十几分钟不动（后来它自己成功了，所以是「很慢」不是「卡死」）。已做兜底：进度 5 分钟没变化才报错退出。
+
+---
+
+## 上传到云端（阿里云 OSS）
+
+有些 AI 接口（如速创 Wan3.0）**只收图片的公网 URL，不收 base64**，而你自己电脑里的图没有公网地址。`upload_server.py` 就是解决这个的。
+
+### 配置
+
+```bash
+config.oss.example.py   →  复制成  config.oss.local.py   →  填 4 个值
+```
+
+| 值 | 去哪拿 |
+|---|---|
+| `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | 控制台 → 头像 → AccessKey 管理（**建议用 RAM 子账号**） |
+| `OSS_ENDPOINT` | bucket 概览页 → 访问域名 |
+| `OSS_BUCKET` | Bucket 列表里的名字 |
+
+**Bucket 的读写权限必须是「公共读」**，否则第三方接口抓不到图（403）。
+
+`config.oss.local.py` 已在 `.gitignore` 里。
+
+### 怎么用
+
+画布里右键任意有图的卡片 → **上传到云端** → URL 自动复制到剪贴板。
+
+后端接口：
+
+```
+GET  http://127.0.0.1:8778/api/health          检查配置和 OSS 连通性
+POST http://127.0.0.1:8778/api/upload          传图
+
+  {"data": "data:image/png;base64,...", "name": "x"}      传 base64 / dataURL
+  {"data": "<纯 base64>",               "name": "x"}      不带前缀也行
+  {"url":  "https://远程地址/xxx.png"}                     远程图转存到你的 OSS
+```
+
+返回 `{"ok":true,"url":"https://bucket.oss-cn-xxx.aliyuncs.com/ai-canvas/xxx.png", ...}`。
+
+文件名会洗成**纯 ASCII**（中文会被丢掉）—— 因为返回的 URL 要交给第三方接口去抓，部分 HTTP 客户端处理非 ASCII URL 会出问题。
+
+---
+
+## 备选：速创 Wan3.0（还没接进画布）
+
+**结论先说：只是调研过，代码没接。** 它的关键差异和坑都记在这里，以后要接直接用。
+
+### 接口
+
+```
+提交：POST https://api.wuyinkeji.com/api/async/video_wan_3.0
+查询：GET  https://api.wuyinkeji.com/api/async/detail?id=任务id
+认证：Authorization: <你的密钥>        （也支持 ?key=<密钥>）
+```
+
+### 它比 Grsai 强在哪
+
+| | Grsai minimax-h3 | 速创 Wan3.0 |
+|---|---|---|
+| 参考图 | 最多 9 张（**收 base64**） | 最多 10 张（**只收 URL**） |
+| 首尾帧 | 无 | 有（`first_frame` / `last_frame`） |
+| 参考视频 | 无 | 最多 5 个 |
+| 时长 | 1~15 秒 | **4~30 秒** |
+| 比例 | landscape / portrait | 16:9 / 9:16 |
+| 价格 | 480p ¥0.05/秒 | **¥0.3/秒（贵 4~6 倍）** |
+
+### ⚠️ 三个必须注意的坑（实测踩过）
+
+**① 参数类型是字符串，不是数字/布尔**
+
+文档的类型列写 `string`，但示例值写 `5` 和 `true`，很容易误传成数字。实测传数字会被拒：
 
 ```jsonc
-// 提交任务
-POST /generate
-{ "kind": "image" | "video", "prompt": "...", "model": "...", "ratio": "16:9",
-  "style": "...", "duration": "5 秒", "width": 960, "height": 540,
-  "refImage": "data:image/... 或素材 id" }
-→ { "taskId": "..." }
+// ✗ 错
+{"duration": 5, "generate_audio": true}
+//   → {"code":400,"msg":"json: cannot unmarshal number into Go struct field .Alias.seconds of type string"}
 
-// 轮询
-GET /generate/:taskId
-→ { "status": "pending|running|done|error", "progress": 0-100,
-    "url": "https://...", "seed": 123, "width": 960, "height": 540,
-    "error": "模型超时" }
-
-// 取消
-POST /generate/:taskId/cancel
+// ✓ 对
+{"duration": "5", "generate_audio": "true"}
 ```
 
-前端按 800ms 轮询，骨架已经写在 `generate.js` 的 `runRemote()` 里 —— 把 `USE_MOCK` 改成 `false` 就会走它，**取消、进度、错误处理全都不用重写**。
+**② 任务 id 在 `data.id`，不在顶层**
 
-如果想要实时进度，`GenAPI.stream()` 里也写好了 SSE 版本（`GET /generate/:taskId/stream`）。
+```jsonc
+// 速创
+{"code":200,"msg":"成功","data":{"id":"video_4d39239e-...","count":10},"exec_time":0.29}
+//                                          ^^^^^^^ 在这
 
-### 结果怎么存
-
-后端返回 `url` 时，前端存进 `result.src`，直接显示远程资源：
-
-```js
-{ kind: 'video', src: 'https://cdn.../out.mp4', w: 960, h: 540, demo: false }
+// 对比 Grsai（id 在顶层）
+{"id":"1-3fb45eaa-...","status":"running"}
 ```
 
-`demo: false` 后 `DEMO` 角标不再出现，视频也会用真正的 `<video>` 播放。
+**③ `images` 和首尾帧/参考视频互斥**
+
+文档在 `images` / `videos` / `audios` 上都写了「与首尾帧选其一」。所以界面上不能让用户同时选「首帧图」和「参考图」。
+
+### 余额不足的报错长这样
+
+```json
+{"code":400,"msg":"请求失败，账户余额不足或没有权限"}
+```
+
+（这个错跟参数错的区分度很高，好排查。注意它**没有**公开的余额查询接口，`/api/user/*` 全是 404。）
+
+---
+
+## 通用：异步任务的两种返回格式对比
+
+接新模型时最容易踩的就是这个，记下来：
+
+| | Grsai | 速创 |
+|---|---|---|
+| 提交返回 | `{id, status}` | `{code, msg, data:{id, count}}` |
+| id 位置 | 顶层 `id` | `data.id` |
+| 查询 | `GET /v1/api/result?id=` | `GET /api/async/detail?id=` |
+| 状态字段 | `status`: running/succeeded/violation/failed | `code` + `data` 里有没有结果 |
+| 进度 | `progress` 0~100 | 无 |
+
+---
+
+## ⚠️ 上线前必做（很重要）
+
+**现在 Grsai 的密钥在前端。本地测试没问题，但一旦部署到公网，任何人按 F12 就能拿到密钥刷你的余额。**
+
+所以顺序必须是：
+
+```
+本地测试        → 密钥放 config.local.js，随便用      ← 开发阶段在这
+准备上公网      → 必须先加后端，把密钥挪到服务器       ← 别忘了这一步
+```
+
+**后端很小**，只需要做一件事：
+
+```
+浏览器 → 你的后端（密钥在这，安全） → Grsai
+```
+
+具体要做的：
+
+- [ ] 写一个转发接口：收前端的请求，加上密钥，转发给 Grsai，把结果原样返回
+- [ ] 把 `config.local.js` 里的密钥删掉，`BASE_URL` 改成你的后端地址
+- [ ] 后端的密钥放环境变量，不要写进代码
+- [ ] 确认仓库里搜不到 `sk-` 开头的字符串
+
+顺便，后端还能解决另外两件事：
+
+- **历史记录同步到云端**（现在只在浏览器本地，换设备看不到）
+- **生成结果备份**（中转站的图床会挂，备份到自己这里更稳）
 
 ---
 

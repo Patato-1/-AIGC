@@ -36,8 +36,26 @@ echo   Keep this window open while you work.
 echo   Close it, or press Ctrl+C, to stop the server.
 echo.
 
+rem ---- image upload service (Aliyun OSS), separate port ----
+set "UPORT=8778"
+:finduport
+netstat -ano | findstr /c:":%UPORT% " | findstr /i "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+  set /a UPORT=%UPORT%+1
+  goto finduport
+)
+if exist "%~dp0upload_server.py" (
+  start "AI Canvas upload" /min cmd /c %PY% "%~dp0upload_server.py" %UPORT%
+  echo   Upload : http://127.0.0.1:%UPORT%/api/health
+  echo.
+)
+
 start "" /min cmd /c "ping -n 3 127.0.0.1 >nul & start http://127.0.0.1:%PORT%/"
-%PY% -m http.server %PORT% --bind 127.0.0.1
+if exist "%~dp0server.py" (
+  %PY% "%~dp0server.py" %PORT%
+) else (
+  %PY% -m http.server %PORT% --bind 127.0.0.1
+)
 goto :done
 
 :fileonly

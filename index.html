@@ -37,6 +37,9 @@
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 6.3"/><path d="M20 5.5V11h-5.5"/></symbol>
     <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.6L12 12.7 3.5 8.1z"/><path d="M3.5 12.6L12 17.2l8.5-4.6"/><path d="M3.5 16.6L12 21.2l8.5-4.6"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.8l4.4 4.2L19 7"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.4 2.1"/></symbol>
+<symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5h10.2a3.8 3.8 0 00.5-7.6 5.6 5.6 0 00-10.8-1.2A4 4 0 007 18.5z"/></symbol>
+<symbol id="i-redo2" viewBox="0 0 24 24"><path d="M4 13a8 8 0 1113.7 5.6"/><path d="M20 11V5.5h-5.5"/></symbol>
   </defs>
 </svg>
 
@@ -83,6 +86,12 @@
     <!-- 浮层：拖拽中的连线 + 删除按钮，在卡片之上 -->
     <svg class="board__overlay" id="overlaySvg" aria-hidden="true"><g id="overlayGroup"></g></svg>
 
+    <!-- @ 图片候选列表（跟着提示词输入框走） -->
+    <div class="atpick" id="atPick" hidden>
+      <div class="atpick__head">选一张连进来的图</div>
+      <div class="atpick__list" id="atPickList"></div>
+    </div>
+
     <div class="marquee" id="marquee" hidden></div>
 
     <!-- 空状态 -->
@@ -127,6 +136,10 @@
       </button>
       <button class="rail__btn" id="toolCreate" type="button" title="创建模型 (N)">
         <svg class="ico"><use href="#i-plus"/></svg>
+      </button>
+      <button class="rail__btn rail__btn--badge" id="toolHistory" type="button" title="生成历史">
+        <svg class="ico"><use href="#i-clock"/></svg>
+        <i class="rail__badge" id="historyBadge" hidden></i>
       </button>
       <div class="rail__sep"></div>
       <button class="rail__btn" id="btnUndo" type="button" title="撤销 (⌘Z)">
@@ -175,6 +188,31 @@
     <div class="sheet__body" id="menuBody"></div>
   </section>
 
+  <!-- 生成历史：图片本身在中转站云端，这里只有索引 -->
+  <section class="sheet sheet--history" id="historySheet" aria-hidden="true">
+    <div class="sheet__grab"></div>
+    <header class="hsheet__head">
+      <h2 class="hsheet__title">生成历史</h2>
+      <span class="hsheet__count" id="historyCount"></span>
+      <span class="hsheet__spacer"></span>
+      <button class="hsheet__tool" id="historyExport" type="button" title="导出历史（备份用）">
+        <svg class="ico"><use href="#i-download"/></svg></button>
+      <button class="hsheet__tool" id="historyImportBtn" type="button" title="导入历史">
+        <svg class="ico"><use href="#i-upload"/></svg></button>
+      <button class="hsheet__tool hsheet__tool--danger" id="historyClear" type="button" title="清空历史">
+        <svg class="ico"><use href="#i-trash"/></svg></button>
+      <button class="hsheet__tool" id="historyClose" type="button" title="关闭">
+        <svg class="ico"><use href="#i-close"/></svg></button>
+    </header>
+    <div class="hsheet__cloud" id="historyCloud">
+      <svg class="ico"><use href="#i-cloud"/></svg>
+      <span>图片存在中转站云端 · 这里只存索引（不占本地空间）</span>
+    </div>
+    <div class="hsheet__body" id="historyBody"></div>
+  </section>
+
+  <input type="file" id="historyInput" accept="application/json,.json" hidden>
+
   <div class="dialog-wrap" id="dialogWrap" hidden>
     <div class="dialog" role="dialog" aria-modal="true">
       <div class="dialog__content">
@@ -187,12 +225,32 @@
   </div>
 
   <div class="toasts" id="toastHost"></div>
+
+  <!-- 全屏查看器：双击卡片里的图/视频打开 -->
+  <div class="viewer" id="viewer" hidden>
+    <div class="viewer__stage" id="viewerStage"></div>
+    <div class="viewer__bar">
+      <span class="viewer__title" id="viewerTitle"></span>
+      <span class="viewer__spacer"></span>
+      <button class="viewer__btn" id="viewerDownload" type="button" title="下载到本地">
+        <svg class="ico"><use href="#i-download"/></svg>
+      </button>
+      <button class="viewer__btn" id="viewerClose" type="button" title="关闭 (Esc)">
+        <svg class="ico"><use href="#i-close"/></svg>
+      </button>
+    </div>
+  </div>
+
   <input type="file" id="imageInput" accept="image/*" multiple hidden>
   <input type="file" id="jsonInput" accept="application/json,.json" hidden>
 </div>
 
+<script src="assets/js/assets.js"></script>
+<script src="assets/js/history.js"></script>
 <script src="assets/js/store.js"></script>
 <script src="assets/js/geometry.js"></script>
+<!-- 本地私有配置：不存在也没关系（404 无害），存在就覆盖 api.js 的默认值 -->
+<script src="config.local.js"></script>
 <script src="assets/js/api.js"></script>
 <script src="assets/js/art.js"></script>
 <script src="assets/js/render.js"></script>

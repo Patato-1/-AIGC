@@ -143,26 +143,53 @@
   async function runRemote(item, job, itemId) {
     var size = resultSize(item);
 
-    // 参考图：来自连进这张卡的素材（多条时取第一条素材）
-    var refImage = null;
-    var inc = Store.doc.links.filter(function (l) { return l.to === itemId; });
-    for (var k = 0; k < inc.length; k++) {
-      var src = Store.get(inc[k].from);
-      if (src && src.kind === 'asset' && src.src) { refImage = src.src; break; }
+    // 参考图：来自连进这张卡的素材（按连线顺序，第一条当主参考）
+    // 图片真身在 IndexedDB，这里取出 Blob 再转成 dataURL 发给后端。
+    // 接中转站时如果对方不收 base64，把这里换成 assets 上传拿 URL 即可（改动只在这几行）。
+    var list = parseRefs(item);            // 已经按 @ 和角色筛过
+    var refImages = [];
+    for (var k = 0; k < list.length; k++) {
+      var r = list[k];
+      var blob = (FC.assets && FC.assets.blobOf(r.assetId)) || null;
+      var data = null;
+      if (blob) {
+        data = await FC.assets.blobToDataURL(blob);
+      } else {
+        var src = Store.get(r.assetId);
+        if (src && src.src) data = src.src;    // 旧数据兜底
+      }
+      if (data) refImages.push({ id: r.assetId, handle: r.handle, name: r.name, role: r.role, data: data });
+      if (refImages.length >= 8) break;      // 别一次塞太多
     }
+    var refImage = refImages.length ? refImages[0].data : null;
 
     var task = await FC.genApi.submit({
+      kind: item.kind === 'video-gen' ? 'video' : 'image',
       kind: item.kind === 'video-gen' ? 'video' : 'image',
       prompt: item.prompt,
       model: item.model,
       ratio: item.ratio,
       style: item.style,
       duration: item.duration,
+      resolution: item.resolution,
       width: size.w,
       height: size.h,
-      refImage: refImage
+      // 参考图 + 各自角色。api.js 负责决定怎么发（base64 还是上传后的 url）。
+      refs: refImages.map(function (r) {
+        return { handle: r.handle, name: r.name, role: r.role, image: r.data };
+      })
     });
     job.taskId = task.taskId;
+
+    // 中转站偶尔会有任务卡死（实测遇到过一个一直停在 progress:2 十几分钟的）。
+    // 所以要有兜底：进度长时间不动 或 总时长超限，就报错退出，别让进度条一直转。
+    // 实测：gpt-image-2.5 可能要十几分钟，而且中间进度会长时间不动（一直显示 2%），
+    // 但最后是成功的。所以这两个值不能太紧，否则会把正常任务误判成卡死。
+    var STALL_MS = 5 * 60 * 1000;     // 进度 5 分钟没变化 → 认为卡死
+    var MAX_MS = 30 * 60 * 1000;      // 总时长上限
+    var t0 = Date.now();
+    var lastPct = -1;
+    var lastChange = Date.now();
 
     var done = false;
     while (!done && !job.cancelled) {
@@ -172,32 +199,95 @@
       var st = await FC.genApi.poll(task.taskId);
       if (job.cancelled) break;
 
-      if (st.progress !== undefined) setProgress(itemId, st.progress);
+      if (st.progress !== undefined) {
+        if (st.progress !== lastPct) { lastPct = st.progress; lastChange = Date.now(); }
+        setProgress(itemId, st.progress);
+      }
 
-      if (st.status === 'done') {
+      if (Date.now() - lastChange > STALL_MS) {
+        throw new Error('任务卡住了：进度停在 ' + lastPct + '% 超过 ' + Math.round(STALL_MS / 60000) + ' 分钟。' +
+          '中转站那边可能排队拥堵或该模型有问题，换个模型或稍后重试。');
+      }
+      if (Date.now() - t0 > MAX_MS) {
+        throw new Error('任务超时（超过 ' + Math.round(MAX_MS / 60000) + ' 分钟还没完成）');
+      }
+
+      // 中转站的状态：running / succeeded / violation / failed
+      if (st.status === 'succeeded') {
         done = true;
+        if (!st.url) throw new Error('生成成功但没拿到图片地址');
         Store.update(itemId, {
           result: {
             kind: item.kind === 'video-gen' ? 'video' : 'image',
             src: st.url,
             seed: st.seed,
-            w: st.width || size.w,
-            h: st.height || size.h,
+            w: size.w,
+            h: size.h,
             createdAt: Date.now(),
             demo: false
           }
         });
+        // 记进生成历史：只存元数据 + 云端地址，不占本地空间。
+        // 卡片以后被删掉，历史里照样找得到。
+        if (FC.history) {
+          FC.history.add({
+            kind: item.kind === 'video-gen' ? 'video' : 'image',
+            prompt: item.prompt || '',
+            model: item.model,
+            ratio: item.ratio,
+            style: item.style,
+            quality: item.kind === 'video-gen' ? undefined : 'auto',
+            duration: item.duration,
+            resolution: item.resolution,
+            refs: refImages.map(function (r) {
+              return { handle: r.handle, name: r.name, role: r.role };   // 只记名字，不记图
+            }),
+            url: st.url,
+            taskId: task.taskId,
+            cardId: itemId,
+            w: size.w,
+            h: size.h,
+            demo: false
+          });
+          if (FC.ui.refreshHistoryBadge) FC.ui.refreshHistoryBadge();
+        }
+
         FC.ui.toast('生成完成', 'i-check');
-      } else if (st.status === 'error') {
+      } else if (st.status === 'failed') {
         throw new Error(st.error || '生成失败');
+      } else if (st.status === 'violation') {
+        throw new Error(st.error || '内容违规，被拒绝了');
       }
     }
   }
 
-  /** 把这张卡的输入来源拼成一个稳定 key，输入变了结果也应该变 */
+  /** 把这张卡的输入拼成一个稳定 key：@ 了哪些、什么角色，都会影响结果 */
   function refKey(item) {
-    return Store.doc.links.filter(function (l) { return l.to === item.id; })
-      .map(function (l) { return l.from; }).sort().join('|');
+    return parseRefs(item).map(function (r) {
+      return r.assetId + ':' + r.role + ':' + (r.used ? '1' : '0');
+    }).join('|');
+  }
+
+  /**
+   * 解析提示词里的 @短名，跟连进来的图对上。
+   * - @ 了的：标记 used=true，带上角色
+   * - 没 @ 的：全部当作「参考」一起带上（保持老行为，不会因为忘了 @ 就不传图）
+   */
+  function parseRefs(item) {
+    var refs = Store.refsOf(item.id);
+    var prompt = String(item.prompt || '');
+    var mentioned = {};
+
+    refs.forEach(function (r) {
+      // 匹配 @名字，后面不能紧跟字母数字（避免 @图1 命中 @图10）
+      var re = new RegExp('@' + r.handle.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '(?![\\\\w\\\\u4e00-\\\\u9fff])');
+      if (re.test(prompt)) { r.used = true; mentioned[r.assetId] = true; }
+    });
+
+    var anyMentioned = Object.keys(mentioned).length > 0;
+    return refs.filter(function (r) {
+      return anyMentioned ? r.used : true;   // 一个都没 @ 时，全部当参考
+    });
   }
 
   function sleep(ms) {
@@ -210,6 +300,7 @@
     cancel: cancel,
     cancelAll: cancelAll,
     isBusy: isBusy,
-    resultSize: resultSize
+    resultSize: resultSize,
+    parseRefs: parseRefs       // 暴露出来便于自测：提示词里的 @ 怎么映射成参考图
   };
 })(window.FC);

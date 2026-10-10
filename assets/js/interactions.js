@@ -461,6 +461,13 @@
             } else {
               FC.ui.toast('这两张卡不能这样连', 'i-close');
             }
+          } else if (!cardId) {
+            // 松手在空白处：弹出创建菜单，选完自动连上（Blender / 虚幻那种手感）
+            var rc = boardRect();
+            var wpc = FC.geo.toWorld(e.clientX - rc.left, e.clientY - rc.top, Store.view);
+            FC.ui.openCreateMenu(e.clientX, e.clientY, wpc, {
+              link: { cardId: g.fromId, side: g.side }
+            });
           }
         } else if (target) {
           var f2 = g.side === 'out' ? g.fromId : target.dataset.node;
@@ -521,9 +528,11 @@
   function onDoubleClick(e) {
     var cardEl = e.target.closest ? e.target.closest('.card') : null;
     if (cardEl) {
-      // 双击卡片正文：生图卡聚焦提示词，图片卡无操作
+      // 生图卡：双击聚焦提示词
       var ta = cardEl.querySelector('[data-k="prompt"]');
-      if (ta) ta.focus();
+      if (ta) { ta.focus(); return; }
+      // 图片卡：双击改名（@ 的短名跟着名字走）
+      if (cardEl.dataset.kind === 'asset') { FC.ui.renameAsset(cardEl.dataset.id); return; }
       return;
     }
     var p = worldPoint(e);
@@ -841,9 +850,18 @@
 
     cardClipboard.links.forEach(function (l) {
       if (map[l.from] && map[l.to]) {
-        Store.doc.links.push({ id: FC.util.uid('lnk'), from: map[l.from], to: map[l.to] });
+        Store.doc.links.push({ id: FC.util.uid('lnk'), from: map[l.from], to: map[l.to], role: l.role || '参考' });
       }
     });
+
+    // 粘贴出来的素材卡也要有图：把 Blob 复制到新 id 上
+    if (FC.assets) {
+      cardClipboard.items.forEach(function (src) {
+        if (src.kind !== 'asset' || !map[src.id]) return;
+        var blob = FC.assets.blobOf(src.id);
+        if (blob) { FC.assets.attach(map[src.id], blob); FC.assets.put(map[src.id], blob); }
+      });
+    }
 
     Store.select(created.map(function (c) { return c.id; }));
     Store.commit();

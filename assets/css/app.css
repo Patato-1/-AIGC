@@ -800,3 +800,259 @@ html[data-theme="dark"] .menulist { background: rgba(255, 255, 255, .05); }
   white-space: nowrap;
 }
 .marquee[data-count=""]::after { display: none; }
+
+/* ==========================================================================
+   @ 图片引用：候选面板 + 输入条上的短名/角色
+   ========================================================================== */
+.atpick {
+  position: fixed; z-index: 60;
+  min-width: 180px; max-width: 320px;
+  background: var(--surface); border: 1px solid var(--card-border);
+  border-radius: var(--r-md); box-shadow: var(--shadow-3);
+  overflow: hidden; padding: 4px;
+  animation: popIn .16s cubic-bezier(.32,.72,0,1);
+}
+.atpick__head {
+  padding: 6px 10px 5px; font-size: 11px; font-weight: 600;
+  color: var(--label-2); letter-spacing: .02em;
+}
+.atpick__list { display: flex; flex-direction: column; gap: 1px; max-height: 240px; overflow: auto; }
+.atpick__item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 9px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--label);
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.atpick__item img, .atpick__item .ico {
+  width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex: 0 0 auto;
+  color: var(--label-2);
+}
+.atpick__item.is-on { background: var(--accent-soft); }
+.atpick__name { flex: 1 1 auto; font-weight: 560; }
+.atpick__role {
+  flex: 0 0 auto; font-size: 11px; color: var(--label-2);
+  padding: 1px 6px; border-radius: var(--r-pill); background: var(--fill-2);
+}
+
+/* 输入条：@短名 + 角色按钮 */
+.inputchip__handle { font-weight: 600; letter-spacing: -.01em; }
+.inputchip__role {
+  flex: 0 0 auto; margin-left: 2px;
+  padding: 2px 8px; border: 0; border-radius: var(--r-pill);
+  background: var(--fill-2); color: var(--label);
+  font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+  transition: background .16s ease, color .16s ease;
+}
+.inputchip__role:hover { background: var(--accent-soft); color: var(--label); }
+.inputchip__x {
+  flex: 0 0 auto; margin-left: 1px; padding: 2px; border: 0;
+  background: transparent; color: var(--label-3); cursor: pointer; border-radius: 50%;
+}
+.inputchip__x:hover { background: var(--fill-2); color: var(--label); }
+.inputchip__x .ico { width: 13px; height: 13px; }
+
+/* 创建菜单顶部的一行说明（从端口拉线建卡时显示「连到 XX」） */
+.ctxmenu__foot {
+  margin: -2px 6px 4px;
+  padding: 0 6px 6px;
+  font-size: 11px; line-height: 1.4;
+  color: var(--label-2);
+  border-bottom: 1px solid var(--sep);
+}
+
+/* 结果图加载失败（中转站图床挂了）时的提示 */
+.stage__broken {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 20px 16px; text-align: center;
+  color: var(--label-2); height: 100%;
+}
+.stage__broken .ico { width: 22px; height: 22px; color: var(--label-3); }
+.stage__broken span { font-size: 13px; font-weight: 600; color: var(--label); }
+.stage__broken small { font-size: 11px; line-height: 1.5; color: var(--label-3); word-break: break-all; }
+.stage__broken .btn { margin-top: 4px; }
+
+/* 生成历史面板 */
+.rail__btn--badge { position: relative; }
+.rail__badge {
+  position: absolute; top: 2px; right: 2px;
+  min-width: 15px; height: 15px; padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--accent); color: var(--accent-fg);
+  font-size: 9px; font-weight: 700; line-height: 15px; text-align: center;
+  font-style: normal; pointer-events: none;
+}.sheet--history { width: min(1080px, 94vw); max-height: 82vh; }
+.hsheet__head { display: flex; align-items: center; gap: 6px; padding: 4px 14px 10px; flex: 0 0 auto; }
+.hsheet__title { flex: 0 0 auto; margin: 0; font-size: 15px; font-weight: 680; }
+.hsheet__count { flex: 0 0 auto; font-size: 12px; color: var(--label-3); }
+.hsheet__spacer { flex: 1 1 auto; }
+.hsheet__tool {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%; background: transparent;
+  color: var(--label-2); cursor: pointer;
+}
+.hsheet__tool:hover { background: var(--fill-2); color: var(--label); }
+.hsheet__tool--danger:hover { background: rgba(255,59,48,.14); color: #ff3b30; }
+.hsheet__tool .ico { width: 16px; height: 16px; }
+.hsheet__cloud {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  margin: 0 14px 10px; padding: 7px 10px;
+  border-radius: var(--r-sm); background: var(--fill);
+  font-size: 11.5px; color: var(--label-2);
+}
+.hsheet__cloud .ico { width: 14px; height: 14px; color: var(--label-3); flex: 0 0 auto; }
+.hsheet__body { flex: 1 1 auto; overflow: auto; padding: 0 14px 16px; }
+.hsheet__empty { padding: 48px 20px; text-align: center; font-size: 13px; line-height: 1.9; color: var(--label-3); }.hgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.hcard {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--card-border); border-radius: var(--r-md);
+  background: var(--surface); overflow: hidden;
+}
+.hcard__media { position: relative; aspect-ratio: 1 / 1; background: var(--fill); overflow: hidden; }
+.hcard__media img, .hcard__media video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hcard__play { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.22); color: #fff; pointer-events: none; }
+.hcard__play .ico { width: 26px; height: 26px; }.hcard__meta { padding: 9px 10px 4px; display: flex; flex-direction: column; gap: 5px; }
+.hcard__top { display: flex; align-items: baseline; gap: 6px; }
+.hcard__model { font-size: 11px; font-weight: 650; color: var(--label-2); }
+.hcard__time { margin-left: auto; font-size: 10.5px; color: var(--label-3); }
+.hcard__prompt {
+  margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--label);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.hcard__params, .hcard__refs { font-size: 10.5px; color: var(--label-3); }.hcard__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 8px 10px 10px; margin-top: auto; }
+.hcard__act {
+  padding: 6px 4px; border: 0; border-radius: var(--r-sm);
+  background: var(--fill); color: var(--label);
+  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
+}
+.hcard__act:hover { background: var(--fill-2); }
+.hcard__act--danger { color: #ff3b30; }
+.hcard__act--danger:hover { background: rgba(255,59,48,.14); }
+/* 历史卡缩略图右上角的下载按钮 */
+.hcard__dl {
+  position: absolute; top: 6px; right: 6px;
+  width: 28px; height: 28px; padding: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%;
+  background: rgba(0,0,0,.42); color: #fff;
+  cursor: pointer; opacity: 0;
+  transition: opacity .16s ease, background .16s ease;
+}
+.hcard:hover .hcard__dl { opacity: 1; }
+.hcard__dl:hover { background: rgba(0,0,0,.68); }
+.hcard__dl .ico { width: 15px; height: 15px; }
+/* ==========================================================================
+   全屏查看器（双击图/视频打开）
+   ========================================================================== */
+/* 关键：hidden 时必须真的消失。
+   否则 .viewer 的 display:flex 会盖过 UA 的 [hidden]{display:none}
+   （两者特异性相同，谁在后面谁赢），结果一层透明的全屏遮罩
+   一直压在画布上，卡片就点不动、拖不动了。 */
+.viewer[hidden] { display: none; }
+
+.viewer {
+  position: fixed; inset: 0; z-index: 9000;
+  display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, .92);
+  backdrop-filter: saturate(160%) blur(18px);
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+  opacity: 0;
+  transition: opacity .2s var(--ease);
+  cursor: zoom-out;
+}
+.viewer.is-in { opacity: 1; }
+
+.viewer__stage {
+  flex: 1 1 auto;
+  display: grid; place-items: center;
+  padding: 52px 40px 8px;
+  min-height: 0;
+  cursor: default;
+}
+.viewer__stage img,
+.viewer__stage video {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto; height: auto;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .55);
+  background: #000;
+}
+
+.viewer__bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px 16px;
+  color: rgba(255, 255, 255, .88);
+}
+.viewer__title {
+  font-size: 12.5px; font-weight: 560;
+  max-width: 60vw;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  opacity: .8;
+}
+.viewer__spacer { flex: 1 1 auto; }
+.viewer__btn {
+  width: 34px; height: 34px; padding: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%;
+  background: rgba(255, 255, 255, .12);
+  color: #fff; cursor: pointer;
+  transition: background-color .16s ease, transform .16s ease;
+}
+.viewer__btn:hover { background: rgba(255, 255, 255, .24); }
+.viewer__btn:active { transform: scale(.94); }
+.viewer__btn .ico { width: 17px; height: 17px; }
+
+/* 卡片里的媒体：暗示可以双击放大 */
+.card__stage img,
+.card__stage video { cursor: zoom-in; }
+
+/* ==========================================================================
+   生成卡的布局调整：媒体当主体，参数区压缩
+   ========================================================================== */
+
+/* 舞台给足空间，圆角略收，和参数区形成主次 */
+.card--gen .card__stage {
+  margin: 0 10px;
+  border-radius: var(--r-md);
+}
+
+/* 参数区整体收紧 */
+.card--gen .card__form {
+  gap: 6px;
+  padding: 9px 10px 10px;
+}
+
+/* 提示词输入框压矮：默认两行的高度就够，需要时能拉高 */
+.card--gen .card__prompt {
+  min-height: 42px;
+  max-height: 96px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 下拉框更紧凑 */
+.card--gen .card__sel {
+  height: 27px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+.card--gen .card__row { gap: 6px; }
+
+/* 参考图 chip 收紧 */
+.card--gen .card__ref { padding: 5px 7px; }
+
+/* 生成按钮不再是粗大黑条，改成更矮的一行 */
+.card--gen .card__action { margin-top: 1px; }
+.card--gen .card__action .btn {
+  height: 34px;
+  font-size: 12.5px;
+  border-radius: var(--r-md);
+}
+.card--gen .card__action .btn .ico { width: 14px; height: 14px; }
+
+/* 顶栏也略收一点，把省下的高度让给媒体 */
+.card--gen .card__bar { padding: 9px 9px 7px 13px; }

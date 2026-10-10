@@ -24,6 +24,20 @@
     if (!doc) doc = await loadFromApi();
     Store.setDoc(doc || Store.demoDoc(), { save: false });
 
+    // 2.5 图片真身在 IndexedDB，渲染前先读进内存（渲染是同步的，必须有缓存）
+    try {
+      var hy = await FC.assets.hydrate(Store.doc.items);
+      if (hy.migrated) {
+        console.info('[main] 已把 ' + hy.migrated + ' 张图片从文档迁进 IndexedDB');
+        Store.markDirty();          // 文档瘦身后要重新存一次
+      }
+      if (hy.missing) {
+        console.warn('[main] 有 ' + hy.missing + ' 张素材的图片数据找不到了');
+      }
+    } catch (e) {
+      console.warn('[main] 图片载入失败', e);
+    }
+
     // 3. UI + 交互
     FC.ui.init();
     FC.interactions.init();

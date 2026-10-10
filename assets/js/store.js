@@ -15,10 +15,12 @@ window.FC = window.FC || {};
       short: '生图',
       desc: '用提示词生成图片',
       icon: 'i-sparkle',
-      w: 300,
+      w: 340,          // 加宽一点，让媒体区当主体
       aspect: '1:1',
-      models: ['deepseek-image', 'flux-schnell', 'sdxl-turbo', 'midjourney-v6'],
-      ratios: ['1:1', '4:3', '3:4', '16:9', '9:16'],
+      // 真实模型名（Grsai 中转站）。gpt-image-2.5 只支持 quality=auto、不支持 background/mask
+      models: ['gpt-image-2.5', 'gpt-image-2', 'gpt-image-2-vip', 'nano-banana-2', 'nano-banana-pro'],
+      // gpt-image-2/2.5：支持比例写法，也支持 1K 像素值。这里用比例
+      ratios: ['auto', '1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3'],
       styles: ['无风格', '摄影', '插画', '3D 渲染', '线稿', '电影感'],
       ports: { in: true, out: true },
       generateLabel: '生成图片'
@@ -29,12 +31,14 @@ window.FC = window.FC || {};
       short: '视频',
       desc: '用提示词生成短视频',
       icon: 'i-video',
-      w: 320,
-      aspect: '16:9',
-      models: ['deepseek-video', 'kling-v1', 'runway-gen3', 'luma-dream'],
-      ratios: ['16:9', '9:16', '1:1', '4:3'],
+      w: 360,          // 加宽一点，让媒体区当主体
+      aspect: 'landscape',
+      models: ['minimax-h3'],
+      // minimax-h3 只认 portrait(竖屏) / landscape(横屏)，不是 16:9 这种写法
+      ratios: ['landscape', 'portrait'],
       styles: ['无风格', '电影感', '延时摄影', '动画', '手持'],
       durations: ['3 秒', '5 秒', '10 秒'],
+      resolutions: ['480p', '768p', '1080p'],   // 1080p 最多 10 秒
       ports: { in: true, out: true },
       generateLabel: '生成视频'
     },
@@ -49,9 +53,49 @@ window.FC = window.FC || {};
     }
   };
 
-  /** 比例字符串 -> 数值 */
+  /* ---------- 参考图角色（@ 引用用） ---------- */
+  var ROLES = ['参考', '主体', '风格', '首帧', '尾帧'];
+  var ROLE_HINT = {
+    '参考': '当作一般参考图',
+    '主体': '保持这张图里的主体/人物一致',
+    '风格': '沿用这张图的画风/色调',
+    '首帧': '视频从这里开始',
+    '尾帧': '视频到这里结束'
+  };
+
+  /**
+   * 从图片名生成一个能 @ 的短名。
+   * 截图 / 相机文件名通常带日期和时间戳（屏幕截图 2026-10-09 135745），
+   * 直接截取会变成 @屏幕截图2026-1 这种没人愿意输的东西，所以先清掉这些噪声。
+   */
+  function handleFrom(name, taken) {
+    var base = String(name || '图片')
+      .replace(/\.[a-z0-9]+$/i, '')                       // 去扩展名
+      .replace(/\d{4}[-_.年]?\d{1,2}[-_.月]?\d{1,2}/g, ' ') // 日期 2026-10-09
+      .replace(/\d{2}[-_.:]\d{2}[-_.:]\d{2}/g, ' ')        // 时间 13:57:45
+      .replace(/\d{4,}/g, ' ')                            // 长数字串 135745
+      .replace(/[^\u4e00-\u9fffa-zA-Z0-9]+/g, '')          // 只留中日韩/字母/数字
+      .replace(/\d{2,}$/, '')                             // 结尾的分辨率 656
+      .slice(0, 8);
+    if (!base) base = '图片';
+    var h = base;
+    var n = 1;
+    while (taken[h]) { n += 1; h = base + n; }
+    taken[h] = true;
+    return h;
+  }
+
+  /**
+   * 比例 -> 数值宽高比（只用于卡片预览区的高度）。
+   * 生图用 "16:9" 这种；视频（minimax-h3）用的是 landscape / portrait 文字，
+   * 生图还有个 "auto" —— 这些都要能显示出合理的预览比例。
+   */
   function ratioValue(r) {
-    var parts = String(r || '1:1').split(':');
+    var s = String(r || '1:1').trim().toLowerCase();
+    if (s === 'landscape') return 16 / 9;
+    if (s === 'portrait') return 9 / 16;
+    if (s === 'auto') return 1;
+    var parts = s.split(':');
     var a = parseFloat(parts[0]), b = parseFloat(parts[1]);
     if (!isFinite(a) || !isFinite(b) || b === 0) return 1;
     return a / b;
@@ -89,6 +133,7 @@ window.FC = window.FC || {};
       item.ratio = def.aspect;
       item.style = def.styles[0];
       if (def.durations) item.duration = def.durations[1];
+      if (def.resolutions) item.resolution = def.resolutions[1];   // 视频分辨率 480p/768p/1080p
       item.result = null;             // { kind, src?, seed?, w, h, createdAt, demo? }
     } else {
       item.src = '';                  // dataURL
@@ -120,7 +165,7 @@ window.FC = window.FC || {};
     var doc = emptyDoc('我的创作画布');
     var a = createItem('image-gen', -430, -190, {
       prompt: '晨雾中的松林，长焦压缩，极简构图',
-      model: 'deepseek-image',
+      model: 'gpt-image-2.5',
       ratio: '4:3',
       style: '摄影',
       z: 1
@@ -129,8 +174,9 @@ window.FC = window.FC || {};
 
     var b = createItem('video-gen', -40, -190, {
       prompt: '镜头缓慢推近，水面涟漪扩散，光影流动',
-      model: 'deepseek-video',
-      ratio: '16:9',
+      model: 'minimax-h3',
+      ratio: 'landscape',
+      resolution: '768p',
       style: '电影感',
       duration: '5 秒',
       z: 2
@@ -171,12 +217,20 @@ window.FC = window.FC || {};
         z: num(it.z, 1)
       });
 
+      // 迁移：生成卡的老默认宽度（生图 300 / 视频 320）加宽一点，
+      // 让媒体区当主体、参数区显得更紧凑。
+      // 只动「恰好还是老默认值」的卡，自己调过宽度的不会被覆盖。
+      if (kind !== 'asset' && (out.w === 300 || out.w === 320)) {
+        out.w = def.w;
+      }
+
       if (kind === 'asset') {
-        out.src = typeof it.src === 'string' ? it.src : '';
         out.name = typeof it.name === 'string' ? it.name : '图片';
         out.naturalW = num(it.naturalW, 0);
         out.naturalH = num(it.naturalH, 0);
-        if (!out.src) return;                      // 没有图源的素材卡直接丢弃
+        // 旧数据兼容：文档里可能还带着 dataURL，交给 assets.hydrate() 迁进 IndexedDB。
+        // 新数据这里没有 src —— 图片存在 IndexedDB 里，所以「没有 src」不能当成坏卡丢掉。
+        if (typeof it.src === 'string' && /^data:/.test(it.src)) out.src = it.src;
       } else {
         out.prompt = typeof it.prompt === 'string' ? it.prompt : '';
         out.model = def.models.indexOf(it.model) >= 0 ? it.model : def.models[0];
@@ -184,6 +238,9 @@ window.FC = window.FC || {};
         out.style = def.styles.indexOf(it.style) >= 0 ? it.style : def.styles[0];
         if (def.durations) {
           out.duration = def.durations.indexOf(it.duration) >= 0 ? it.duration : def.durations[1];
+        }
+        if (def.resolutions) {
+          out.resolution = def.resolutions.indexOf(it.resolution) >= 0 ? it.resolution : def.resolutions[1];
         }
         if (it.result && typeof it.result === 'object') {
           var rs = it.result;
@@ -210,17 +267,20 @@ window.FC = window.FC || {};
     doc.items.forEach(function (i) { canIn[i.id] = KINDS[i.kind].ports.in; });
     doc.links = [];
     var linkSeen = {};
-    function pushLink(from, to) {
+    function pushLink(from, to, role) {
       if (!ids[from] || !ids[to] || from === to) return;
       if (!canIn[to]) return;                     // 目标卡片不接受输入
       var key = from + '>' + to;
       if (linkSeen[key]) return;
       linkSeen[key] = true;
-      doc.links.push({ id: uid('lnk'), from: from, to: to });
+      doc.links.push({
+        id: uid('lnk'), from: from, to: to,
+        role: ROLES.indexOf(role) >= 0 ? role : '参考'
+      });
     }
     (Array.isArray(raw.links) ? raw.links : []).forEach(function (l) {
       if (!l || typeof l !== 'object') return;
-      pushLink(l.from, l.to);
+      pushLink(l.from, l.to, l.role);
     });
     // 兼容旧数据：refId 迁移成连线
     doc.items.forEach(function (i) {
@@ -421,6 +481,12 @@ window.FC = window.FC || {};
       var set = {};
       ids.forEach(function (id) { set[id] = true; });
       var before = this.doc.items.length;
+
+      // 先记下要删的素材卡：图片在 IndexedDB 里，得另外清
+      var assetIds = this.doc.items
+        .filter(function (i) { return set[i.id] && i.kind === 'asset'; })
+        .map(function (i) { return i.id; });
+
       this.doc.items = this.doc.items.filter(function (i) { return !set[i.id]; });
       // 级联删掉与这些卡片相关的连线
       var deadLinks = this.doc.links.filter(function (l) { return set[l.from] || set[l.to]; })
@@ -431,6 +497,9 @@ window.FC = window.FC || {};
         this.doc.links = this.doc.links.filter(function (l) { return !lset[l.id]; });
         this.selectedLinks = this.selectedLinks.filter(function (id) { return !lset[id]; });
       }
+      // 图片从 IndexedDB 删掉，别白占地方
+      if (assetIds.length && FC.assets) FC.assets.drop(assetIds);
+
       ids.forEach(function (id) { delete this.runtime.progress[id]; }, this);
       this.selection = this.selection.filter(function (id) { return !set[id]; });
       this.commit();
@@ -457,14 +526,107 @@ window.FC = window.FC || {};
       // 复制这一组内部原有的连线
       this.doc.links.slice().forEach(function (l) {
         if (map[l.from] && map[l.to]) {
-          self.doc.links.push({ id: uid('lnk'), from: map[l.from], to: map[l.to] });
+          self.doc.links.push({ id: uid('lnk'), from: map[l.from], to: map[l.to], role: l.role || '参考' });
         }
       });
+      // 素材卡复制：图片也得跟着复制一份，否则新卡片没有图
+      if (FC.assets) {
+        ids.forEach(function (id) {
+          var orig = self.get(id);
+          if (!orig || orig.kind !== 'asset' || !map[id]) return;
+          var blob = FC.assets.blobOf(id);
+          if (blob) FC.assets.put(map[id], blob);
+        });
+      }
+
       if (copies.length) {
         this.select(copies.map(function (c) { return c.id; }));
         this.commit();
       }
       return copies;
+    },
+
+    /* --- 参考图（@ 引用） --- */
+    /**
+     * 取某张卡的输入参考列表（按连线顺序），带短名、角色、图片地址。
+     * 短名（handle）在这里即时算：同一张卡内不重名，所以 @ 不会有歧义。
+     */
+    refsOf: function (cardId) {
+      var self = this;
+      var taken = {};
+      var out = [];
+      this.doc.links.forEach(function (l) {
+        if (l.to !== cardId) return;
+        var a = self.get(l.from);
+        if (!a || a.kind !== 'asset') return;
+        out.push({
+          linkId: l.id,
+          assetId: a.id,
+          name: a.name || '图片',
+          handle: handleFrom(a.name, taken),
+          role: ROLES.indexOf(l.role) >= 0 ? l.role : '参考'
+        });
+      });
+      return out;
+    },
+
+    /**
+     * 给素材改名。
+     * @ 的短名是从 name 算出来的，所以改完名字，@ 自动跟着变。
+     * 已经写进提示词里的 @旧名 也会一起改成 @新名，不会变成死引用。
+     */
+    renameAsset: function (assetId, newName, opts) {
+      var self = this;
+      var item = this.get(assetId);
+      if (!item || item.kind !== 'asset') return false;
+      var clean = String(newName == null ? '' : newName).trim().slice(0, 40);
+      if (!clean || clean === item.name) return false;
+
+      // 1) 改名之前，先把「哪些卡把它当输入」以及各自算出来的旧短名记下来
+      var affected = [];
+      this.doc.items.forEach(function (card) {
+        if (card.kind === 'asset') return;
+        var refs = self.refsOf(card.id);
+        refs.forEach(function (r) {
+          if (r.assetId === assetId) affected.push({ cardId: card.id, oldHandle: r.handle });
+        });
+      });
+
+      item.name = clean;
+
+      // 2) 提示词里的 @旧名 换成 @新名
+      affected.forEach(function (a) {
+        var card = self.get(a.cardId);
+        if (!card) return;
+        var refs = self.refsOf(card.id);
+        var mine = refs.filter(function (r) { return r.assetId === assetId; })[0];
+        if (!mine || mine.handle === a.oldHandle) return;
+        var esc2 = a.oldHandle.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+        var re = new RegExp('@' + esc2 + '(?![\\\\w\\\\u4e00-\\\\u9fff])', 'g');
+        card.prompt = String(card.prompt || '').replace(re, '@' + mine.handle);
+      });
+
+      if (!opts || opts.commit !== false) this.commit();
+      return true;
+    },
+
+    setLinkRole: function (linkId, role, opts) {
+      if (ROLES.indexOf(role) < 0) return false;
+      var l = this.doc.links.filter(function (x) { return x.id === linkId; })[0];
+      if (!l) return false;
+      l.role = role;
+      if (!opts || opts.commit !== false) this.commit();
+      return true;
+    },
+
+    /** 点一下换下一个角色 */
+    cycleLinkRole: function (linkId) {
+      var l = this.doc.links.filter(function (x) { return x.id === linkId; })[0];
+      if (!l) return null;
+      var i = ROLES.indexOf(l.role);
+      var next = ROLES[(i < 0 ? 0 : i + 1) % ROLES.length];
+      this.setLinkRole(linkId, next);
+      return next;
     },
 
     /* --- 连线（轻量连接） --- */
@@ -488,7 +650,7 @@ window.FC = window.FC || {};
 
     addLink: function (fromId, toId, opts) {
       if (!this.canLink(fromId, toId)) return null;
-      var link = { id: uid('lnk'), from: fromId, to: toId };
+      var link = { id: uid('lnk'), from: fromId, to: toId, role: '参考' };
       this.doc.links.push(link);
       if (!opts || opts.commit !== false) this.commit();
       return link;
@@ -589,6 +751,10 @@ window.FC = window.FC || {};
       }
     }
   };
+
+  FC.ROLES = ROLES;
+  FC.ROLE_HINT = ROLE_HINT;
+  FC.handleFrom = handleFrom;
 
   FC.STORAGE_KEY = 'aic.doc.v1';
   FC.THEME_KEY = 'aic.theme.v1';

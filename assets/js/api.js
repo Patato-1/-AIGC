@@ -12,8 +12,30 @@
     USE_MOCK: true,                  // ← 接后端时改成 false
     BASE_URL: '/api',                // ← 例如 https://api.your-domain.com/api
     TOKEN_KEY: 'aic.token.v1',
-    TIMEOUT: 20000
+    TIMEOUT: 20000,
+
+    /* ---- 以下由 config.local.js 覆盖（那个文件不会提交到 GitHub）---- */
+    API_KEY: '',                     // 密钥只放本地，别写进这个文件
+    API_KEY_HEADER: 'Authorization',  // 有些中转站用别的头名
+    API_KEY_PREFIX: 'Bearer ',        // 有的不要前缀，填 ''
+    IMAGE_MODE: 'auto',               // 'base64' | 'url' | 'auto'
+    UPLOAD_URL: '',
+    UPLOAD_FIELD: 'file',
+    MODELS: { image: '', video: '' }
   };
+
+  // 合并本地配置（config.local.js 里的 window.FC.LOCAL）
+  if (FC.LOCAL && typeof FC.LOCAL === 'object') {
+    Object.keys(FC.LOCAL).forEach(function (k) {
+      var v = FC.LOCAL[k];
+      if (v === undefined || v === '') return;        // 空值不覆盖默认
+      if (k === 'MODELS' && typeof v === 'object') {
+        CONFIG.MODELS = Object.assign({}, CONFIG.MODELS, v);
+        return;
+      }
+      CONFIG[k] = v;
+    });
+  }
 
   var LS_KEY = 'aic.boards.v1';
 
@@ -157,75 +179,144 @@
         data: { "status": "running", "progress": 42 }
         data: { "status": "done", "url": "https://..." }
      ========================================================================== */
+  /* ==========================================================================
+     GenAPI — 接 Grsai 中转站
+     --------------------------------------------------------------------------
+     文档：https://qmy27nhsd9.apifox.cn/
+
+     节点（二选一）：
+       https://grsaiapi.com          全球节点
+       https://grsai.dakka.com.cn    国内节点
+     认证：Authorization: Bearer sk-xxx
+
+     提交：POST /v1/api/generate   → { id, status }
+     查询：GET  /v1/api/result?id= → { id, status, progress, results:[{url}], error }
+     状态：running / violation / succeeded / failed
+
+     用 replyType:"async" 而不是 "json"：async 会带 progress（0~100），
+     卡片上的进度条能直接用，而且长任务不会把 HTTP 请求拖到超时。
+     ========================================================================== */
+
+  /** 认证头：优先用 config.local.js 里的 API_KEY，其次 localStorage 里的 token */
+  function genHeaders() {
+    var h = { 'Content-Type': 'application/json' };
+    var key = CONFIG.API_KEY || token();
+    if (key) {
+      var prefix = CONFIG.API_KEY_PREFIX === undefined ? 'Bearer ' : CONFIG.API_KEY_PREFIX;
+      h[CONFIG.API_KEY_HEADER || 'Authorization'] = prefix + key;
+    }
+    return h;
+  }
+
+  async function genFetch(method, path, body) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, CONFIG.TIMEOUT);
+    try {
+      var res = await fetch(CONFIG.BASE_URL + path, {
+        method: method,
+        headers: genHeaders(),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      var text = '' ;
+      try { text = await res.text(); } catch (e) { /* ignore */ }
+      var data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+
+      if (!res.ok) {
+        var msg = (data && (data.error || data.message)) || text || res.statusText;
+        throw ApiError(res.status, msg, path);
+      }
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 把 ratio 之类的值转成中转站要的写法 */
+  function normalizeRatio(kind, ratio) {
+    var r = String(ratio || '' ).trim();
+    if (kind === 'video') {
+      // minimax-h3 只认 portrait / landscape
+      if (r === 'portrait' || r === 'landscape') return r;
+      var v = FC.util.ratioValue(r);
+      return v >= 1 ? 'landscape' : 'portrait';
+    }
+    return r || 'auto';      // 生图：'auto' / '16:9' / '1024x1024' 都行
+  }
+
+  /** '5 秒' -> 5 */
+  function durationNumber(s) {
+    var n = parseInt(String(s || '5').replace(/[^0-9]/g, ''), 10);
+    if (!isFinite(n) || n <= 0) return 5;
+    return FC.util.clamp(n, 1, 15);
+  }
+
   var GenAPI = {
     config: CONFIG,
+
     /**
      * 提交生成任务
+     * @param {object} job  { kind, prompt, model, ratio, style, duration, resolution, refs:[{image,role}] }
      * @returns {Promise<{taskId:string, mock?:boolean}>}
      */
     submit: async function (job) {
-      if (!CONFIG.USE_MOCK) {
-        // 真实实现：
-        // return request('POST', '/generate', {
-        //   kind: job.kind,              // 'image' | 'video'
-        //   prompt: job.prompt,
-        //   model: job.model,
-        //   ratio: job.ratio,
-        //   style: job.style,
-        //   duration: job.duration,
-        //   refImage: job.refImage       // dataURL 或已上传的素材 id
-        // });
-        return request('POST', '/generate', job);
+      if (CONFIG.USE_MOCK) {
+        await delay(160);
+        return { taskId: 'mock_' + FC.util.uid('t'), mock: true };
       }
-      await delay(160);
-      return { taskId: 'mock_' + FC.util.uid('t'), mock: true };
+
+      var model = job.model;
+      var body = {
+        model: model,
+        prompt: job.prompt || '',
+        replyType: 'async'              // 带 progress，能驱动进度条
+      };
+
+      // 参考图：中转站收 base64 也收 url
+      if (job.refs && job.refs.length) {
+        body.images = job.refs.map(function (r) { return r.image; }).filter(Boolean);
+      }
+
+      if (job.kind === 'video') {
+        body.aspectRatio = normalizeRatio('video', job.ratio);
+        body.resolution = job.resolution || '768p';
+        body.duration = durationNumber(job.duration);
+        if (job.seed !== undefined) body.seed = job.seed;
+      } else {
+        body.aspectRatio = normalizeRatio('image', job.ratio);
+        body.quality = 'auto';          // gpt-image-2.5 只支持 auto
+      }
+
+      var out = await genFetch('POST', '/v1/api/generate', body);
+      if (!out || !out.id) throw ApiError(500, '响应里没有 id', '/v1/api/generate');
+      return { taskId: String(out.id), status: out.status };
     },
 
     /**
      * 查询任务
-     * @returns {Promise<{status:string, progress:number, url?:string, seed?:number}>}
+     * @returns {Promise<{status:string, progress:number, url?:string, error?:string}>}
      */
     poll: async function (taskId) {
-      if (!CONFIG.USE_MOCK) {
-        return request('GET', '/generate/' + encodeURIComponent(taskId));
-      }
-      return { status: 'running', progress: 0 };
+      if (CONFIG.USE_MOCK) return { status: 'running', progress: 0 };
+
+      var out = await genFetch('GET', '/v1/api/result?id=' + encodeURIComponent(taskId));
+      var st = String((out && out.status) || 'running');
+      return {
+        status: st,
+        progress: (out && isFinite(out.progress)) ? out.progress : undefined,
+        url: (out && out.results && out.results[0] && out.results[0].url) || undefined,
+        error: (out && out.error) || undefined
+      };
     },
 
-    /** POST /generate/:taskId/cancel */
-    cancel: async function (taskId) {
-      if (!CONFIG.USE_MOCK) {
-        return request('POST', '/generate/' + encodeURIComponent(taskId) + '/cancel');
-      }
+    cancel: async function () {
+      // 中转站没有取消接口，前端停止轮询即可
       return { ok: true };
     },
 
-    /**
-     * SSE 流式版本（可选）
-     * onEvent({status, progress, url, error})
-     */
-    stream: async function (taskId, onEvent, signal) {
-      if (CONFIG.USE_MOCK) return;
-      var res = await fetch(CONFIG.BASE_URL + '/generate/' + encodeURIComponent(taskId) + '/stream', {
-        headers: headers(), signal: signal
-      });
-      var reader = res.body.getReader();
-      var dec = new TextDecoder();
-      var buf = '';
-      for (;;) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        buf += dec.decode(chunk.value, { stream: true });
-        var parts = buf.split('\n\n');
-        buf = parts.pop();
-        for (var i = 0; i < parts.length; i++) {
-          var line = parts[i].split('\n').filter(function (l) { return l.indexOf('data:') === 0; })[0];
-          if (line) {
-            try { onEvent(JSON.parse(line.slice(5).trim())); } catch (e) { /* ignore */ }
-          }
-        }
-      }
-    }
+    /** 没实现（中转站用轮询，不需要 SSE） */
+    stream: async function () { return; }
   };
 
   FC.api = BoardAPI;
