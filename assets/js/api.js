@@ -38,10 +38,16 @@
     MODELS: { image: '', video: '' }
   };
 
-  // 合并本地配置（config.local.js 里的 window.FC.LOCAL）
-  if (FC.LOCAL && typeof FC.LOCAL === 'object') {
-    Object.keys(FC.LOCAL).forEach(function (k) {
-      var v = FC.LOCAL[k];
+  // 合并配置。顺序很重要，后面的覆盖前面的：
+  //   默认值 → FC.DEPLOY（部署用，只有地址，无密钥） → FC.LOCAL（本地，优先级最高）
+  //
+  // 这样同一份代码在两种环境下都对：
+  //   线上（GitHub Pages / OSS）：没有 config.local.js，用 config.deploy.js 的后端地址
+  //   本地：config.local.js 存在，覆盖掉部署配置，指向 127.0.0.1
+  [FC.DEPLOY, FC.LOCAL].forEach(function (src) {
+    if (!src || typeof src !== 'object') return;
+    Object.keys(src).forEach(function (k) {
+      var v = src[k];
       if (v === undefined || v === '') return;        // 空值不覆盖默认
       if (k === 'MODELS' && typeof v === 'object') {
         CONFIG.MODELS = Object.assign({}, CONFIG.MODELS, v);
@@ -49,7 +55,7 @@
       }
       CONFIG[k] = v;
     });
-  }
+  });
 
   var LS_KEY = 'aic.boards.v1';
 
