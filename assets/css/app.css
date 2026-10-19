@@ -1056,3 +1056,21 @@ html[data-theme="dark"] .menulist { background: rgba(255, 255, 255, .05); }
 
 /* 顶栏也略收一点，把省下的高度让给媒体 */
 .card--gen .card__bar { padding: 9px 9px 7px 13px; }
+/* ==========================================================================
+   结果存储状态角标
+   --------------------------------------------------------------------------
+   已转存到自己 OSS → 小云朵（永久）
+   没转存成功       → 时钟图标（几小时后可能失效，提示手动上传）
+   ========================================================================== */
+.stage__store {
+  position: absolute; top: 8px; left: 8px;
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .42);
+  color: #fff;
+  pointer-events: auto;
+}
+.stage__store .ico { width: 12px; height: 12px; stroke-width: 2; }
+.stage__store--safe { background: rgba(0, 0, 0, .38); }
+.stage__store--warn { background: rgba(255, 149, 0, .88); color: #1c1c1e; }

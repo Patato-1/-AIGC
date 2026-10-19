@@ -1,0 +1,9 @@
+# ai-canvas 后端依赖
+#
+# 只有这一个第三方包。
+# 其余全部是 Python 标准库：urllib / json / http.server / base64 / re / threading ...
+#
+# 为什么只用 oss2：OSS 的签名算法（HMAC-SHA1 + 一堆坑）自己实现容易出错，
+# 用官方 SDK 更稳。其他事情标准库够用，不想为了"方便"引入一堆依赖。
+
+oss2==2.19.1

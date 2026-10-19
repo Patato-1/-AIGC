@@ -57,6 +57,10 @@
     try {
       if (FC.genApi.config.USE_MOCK) {
         await runMock(item, job, itemId);
+      } else if (isWan3(item)) {
+        // 速创 Wan3.0 走自己的通道：密钥在后端、参考图要先传成公网 URL、
+        // 返回结构也和 Grsai 不一样。细节看 runWan3。
+        await runWan3(item, job, itemId);
       } else {
         await runRemote(item, job, itemId);
       }
@@ -137,6 +141,176 @@
   }
 
   /* ==========================================================================
+     速创 Wan3.0（走本地后端转发）
+     --------------------------------------------------------------------------
+     它和 Grsai 的差别挺大，所以单独一条通道：
+
+       1. 密钥在后端（config.wuyinkeji.local.py）—— 浏览器看不到，安全
+       2. images 只收【公网 URL】，不收 base64
+          → 所以生成前要把连进来的参考图自动上传到自己的 OSS
+       3. 任务 id 在 data.id（Grsai 在顶层）
+       4. 返回里没有 progress，只有"跑完了没"
+       5. duration / generate_audio 必须传字符串
+
+     参考图的 OSS 地址会记在素材卡的 remoteUrl 上，同一张图只传一次。
+     ========================================================================== */
+
+  function isWan3(item) {
+    return !!(item && item.model === 'wan3.0');
+  }
+
+  function backendBase() {
+    // 统一由 api.js 推导（它知道 BACKEND_URL 和同源的情况），这里不再自己拼
+    return (FC.api && FC.api.backendBase) ? FC.api.backendBase() : '';
+  }
+
+  /**
+   * 把连进这张卡的参考图，逐张变成公网 URL。
+   * - 已经传过的（素材卡上有 remoteUrl）直接用，不重复传
+   * - 没传过的走「上传到云端」，传完把地址记回素材卡
+   * @returns {Promise<string[]>} 公网地址列表
+   */
+  async function collectRefUrls(item) {
+    var list = parseRefs(item);
+    var urls = [];
+    var need = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (!Store.get(list[i].assetId).remoteUrl) need++;
+    }
+    if (need) FC.ui.toast('正在上传 ' + need + ' 张参考图…', 'i-cloud');
+
+    for (var k = 0; k < list.length && urls.length < 10; k++) {
+      var r = list[k];
+      var asset = Store.get(r.assetId);
+      if (!asset) continue;
+
+      // 已经传过的直接用
+      if (asset.remoteUrl && FC.ui.isOssUrl(asset.remoteUrl)) {
+        urls.push(asset.remoteUrl);
+        continue;
+      }
+
+      var blob = (FC.assets && FC.assets.blobOf(asset.id)) ||
+                 (FC.assets && FC.assets.get ? await FC.assets.get(asset.id) : null);
+      if (!blob) {
+        // 远程图（比如从历史放回画布的）直接拿它的地址
+        if (asset.remoteUrl) { urls.push(asset.remoteUrl); continue; }
+        if (asset.src && /^https?:/.test(asset.src)) { urls.push(asset.src); continue; }
+        continue;
+      }
+
+      var url = await FC.ui.uploadToCloud(URL.createObjectURL(blob), asset.name || '参考图');
+      if (!url) continue;
+      // 记回素材卡，下次不用再传
+      Store.update(asset.id, { remoteUrl: url }, { commit: false });
+      urls.push(url);
+    }
+    return urls;
+  }
+
+  async function runWan3(item, job, itemId) {
+    var base = backendBase();
+    if (!base) {
+      throw new Error('没配上传服务地址（config.local.js 的 UPLOAD_URL），无法调用后端');
+    }
+
+    var size = resultSize(item);
+
+    // 1) 参考图 → 公网 URL
+    var urls = await collectRefUrls(item);
+    if (job.cancelled) return;
+
+    // 2) 提交（后端加密钥转发）
+    setProgress(itemId, 3);
+    var body = {
+      prompt: item.prompt,
+      images: urls,                            // 数组，后端会拼成逗号串
+      ratio: item.ratio,
+      duration: String(parseInt(item.duration, 10) || 5),   // 必须字符串
+      generate_audio: 'false'                  // 先不生成音频（省时间）
+    };
+    var res = await fetch(base + '/api/wy/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    var out = null;
+    try { out = await res.json(); } catch (e) { out = null; }
+    if (!out || !out.ok) {
+      throw new Error((out && out.error) || ('提交失败 HTTP ' + res.status));
+    }
+    job.taskId = out.id;
+    setProgress(itemId, 8);
+
+    // 3) 轮询。它不给进度百分比，所以进度条走个假的"心跳"表现还在跑。
+    var STALL_MS = 8 * 60 * 1000;
+    var MAX_MS = 30 * 60 * 1000;
+    var t0 = Date.now();
+    var lastChange = Date.now();
+    var fake = 8;
+
+    while (!job.cancelled) {
+      await sleep(6000);
+      if (job.cancelled) break;
+
+      var r2 = await fetch(base + '/api/wy/detail?id=' + encodeURIComponent(job.taskId));
+      var st = null;
+      try { st = await r2.json(); } catch (e) { st = null; }
+      if (!st) continue;
+
+      // 心跳：慢慢往上爬，但不超过 95%，免得看起来"已经完成"
+      fake = Math.min(95, fake + 3);
+      setProgress(itemId, fake);
+
+      if (st.status === 'succeeded' && st.url) {
+        Store.update(itemId, {
+          result: {
+            kind: 'video',
+            src: st.url,
+            w: size.w,
+            h: size.h,
+            createdAt: Date.now(),
+            demo: false
+          }
+        });
+        if (FC.history) {
+          FC.history.add({
+            kind: 'video',
+            prompt: item.prompt || '',
+            model: item.model,
+            ratio: item.ratio,
+            duration: item.duration,
+            refs: (await Promise.resolve(parseRefs(item))).map(function (x) {
+              return { handle: x.handle, name: x.name, role: x.role };
+            }),
+            url: st.url,
+            taskId: job.taskId,
+            cardId: itemId,
+            w: size.w,
+            h: size.h,
+            demo: false
+          });
+          if (FC.ui.refreshHistoryBadge) FC.ui.refreshHistoryBadge();
+        }
+        FC.ui.toast('生成完成', 'i-check');
+        archiveResult(itemId, st.url, item.prompt, true);
+        return;
+      }
+
+      if (st.status === 'failed') {
+        throw new Error(st.error || '生成失败');
+      }
+
+      if (Date.now() - lastChange > STALL_MS) {
+        throw new Error('任务卡住了：超过 ' + Math.round(STALL_MS / 60000) + ' 分钟没有变化');
+      }
+      if (Date.now() - t0 > MAX_MS) {
+        throw new Error('任务超时（超过 ' + Math.round(MAX_MS / 60000) + ' 分钟）');
+      }
+    }
+  }
+
+  /* ==========================================================================
      真实后端：轮询任务
      （把 CONFIG.USE_MOCK 改成 false 就会走这里）
      ========================================================================== */
@@ -164,7 +338,6 @@
     var refImage = refImages.length ? refImages[0].data : null;
 
     var task = await FC.genApi.submit({
-      kind: item.kind === 'video-gen' ? 'video' : 'image',
       kind: item.kind === 'video-gen' ? 'video' : 'image',
       prompt: item.prompt,
       model: item.model,
@@ -253,12 +426,71 @@
         }
 
         FC.ui.toast('生成完成', 'i-check');
+
+        // 后台转存到你自己的 OSS。
+        // 中转站的图床是临时的（实测约 4 小时后 404），不搬走的话这张图迟早会失效。
+        // 特意不 await —— 卡片已经能看了，转存慢不该拖住你。
+        archiveResult(itemId, st.url, item.prompt, item.kind === 'video-gen');
       } else if (st.status === 'failed') {
         throw new Error(st.error || '生成失败');
       } else if (st.status === 'violation') {
         throw new Error(st.error || '内容违规，被拒绝了');
       }
     }
+  }
+
+  /**
+   * 生成结果转存到自己的 OSS，然后把卡片和历史里的地址都换成 OSS 的。
+   *
+   * 为什么要有这一步：中转站的图床会过期（实测约 4 小时后 404），
+   * 不搬走的话画布上的图过一天就集体失效了。
+   *
+   * 失败不影响卡片 —— 结果还在中转站，只是几小时后可能会失效，
+   * 所以失败时给个明确提示，让你知道该手动「上传到云端」。
+   */
+  async function archiveResult(itemId, relayUrl, prompt, isVideo) {
+    if (!FC.ui || !FC.ui.archiveToCloud) return;
+    if (!relayUrl || /^(blob:|data:)/i.test(relayUrl)) return;
+
+    var ossUrl = null;
+    try {
+      ossUrl = await FC.ui.archiveToCloud(relayUrl, prompt || '生成结果');
+    } catch (e) {
+      ossUrl = null;
+    }
+
+    // 拿不到 OSS 地址：说明没跑上传服务、OSS 没配、或者抓取失败了。
+    // 不发 toast 刷屏，只在控制台留一句，卡片上会有"仅中转站"的角标提示。
+    if (!ossUrl) {
+      console.warn('[archive] 没能转存，这张结果仍在中转站，可能会过期：' + relayUrl);
+      var cur = Store.get(itemId);
+      if (cur && cur.result && cur.result.src === relayUrl) {
+        Store.update(itemId, {
+          result: Object.assign({}, cur.result, { archiveFailed: true })
+        });
+      }
+      return;
+    }
+
+    // 转存成功 —— 但期间用户可能已经重新生成了，地址变了就别覆盖
+    var now = Store.get(itemId);
+    if (!now || !now.result || now.result.src !== relayUrl) return;
+
+    Store.update(itemId, {
+      result: Object.assign({}, now.result, {
+        src: ossUrl,              // 换成永久地址
+        origin: relayUrl,         // 记着原始地址，方便排查
+        archived: true,
+        archiveFailed: false
+      })
+    });
+
+    // 历史里那条也要换，否则从历史「放回画布」拿到的还是会过期的地址
+    if (FC.history && FC.history.patchLatest) {
+      FC.history.patchLatest(itemId, { url: ossUrl, origin: relayUrl, archived: true });
+    }
+
+    FC.ui.toast('已转存到你的云端', 'i-cloud');
   }
 
   /** 把这张卡的输入拼成一个稳定 key：@ 了哪些、什么角色，都会影响结果 */

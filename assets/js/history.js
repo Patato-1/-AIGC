@@ -208,6 +208,33 @@
 
   function count() { return (cache || []).length; }
 
+  /**
+   * 改某张卡「最近一条」记录。
+   * 用途：生成结果从中转站转存到自己的 OSS 之后，把历史里的地址也一起换掉，
+   * 否则以后从历史里「放回画布」拿到的还是那个会过期的中转站地址。
+   */
+  function patchLatest(cardId, patch) {
+    if (!cardId || !cache || !cache.length) return Promise.resolve(null);
+    // cache 是按时间倒序的，找第一条属于这张卡的
+    for (var i = 0; i < cache.length; i++) {
+      if (cache[i].cardId === cardId) {
+        Object.assign(cache[i], patch || {});
+        var rec = cache[i];
+        return open().then(function (ok) {
+          if (!ok) return rec;
+          return new Promise(function (resolve) {
+            try {
+              var r = db.transaction(STORE, 'readwrite').objectStore(STORE).put(rec);
+              r.onsuccess = function () { resolve(rec); };
+              r.onerror = function () { resolve(rec); };
+            } catch (e) { resolve(rec); }
+          });
+        });
+      }
+    }
+    return Promise.resolve(null);
+  }
+
   FC.history = {
     open: open,
     available: available,
@@ -216,6 +243,7 @@
     remove: remove,
     clear: clear,
     byCard: byCard,
+    patchLatest: patchLatest,
     exportJSON: exportJSON,
     importJSON: importJSON,
     count: count

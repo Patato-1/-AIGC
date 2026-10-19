@@ -3,32 +3,52 @@
    --------------------------------------------------------------------------
    用法：
      1. 把这个文件复制成  config.local.js
-     2. 在 config.local.js 里填你自己的密钥和地址
+     2. 在 config.local.js 里填你自己的地址
      3. config.local.js 已经在 .gitignore 里，永远不会被提交
 
    ⚠️ 千万不要把密钥填进这个文件（config.example.js 是会提交到 GitHub 的）。
+   ⚠️ 密钥也不要填进 config.local.js 的 API_KEY —— 它属于「直连调试」模式，
+      线上用不到。正式用法是把密钥放后端（见下面 BACKEND_URL 的说明）。
    ========================================================================== */
 window.FC = window.FC || {};
 
 window.FC.LOCAL = {
-  /* ---- 接中转站 / 后端 ---- */
-  USE_MOCK: false,                       // false = 走真实接口
-  BASE_URL: 'https://你的中转站地址',      // 例如 https://api.example.com
-  API_KEY: '',                           // ← 你的密钥填这里（只在 config.local.js 里填）
+  /* ---- 走真实接口（false = 不用演示模式）---- */
+  USE_MOCK: false,
 
-  /* ---- 图片怎么发给对方 ---- */
+  /* ---- 后端地址：所有需要密钥的调用都走这里 ----
+     密钥放在后端（grsai.py / wan3.py 读的那个配置文件），
+     浏览器永远拿不到密钥 —— 这是上线的基本要求。
+
+       本地开发    'http://127.0.0.1:8778'
+       线上部署    'https://你的后端域名'
+       同源部署    ''   ← 推荐。前端和后端放同一个域名下，没有跨域问题，
+                          而且前端不用改一行代码就能换环境。
+
+     留空时：会自动用当前站点的 origin（同源）。
+     但如果你是 file:// 直接打开 index.html，同源推导不出来，必须显式填。 */
+  BACKEND_URL: 'http://127.0.0.1:8778',
+
+  /* ---- 上传接口（留空则由 BACKEND_URL 推导成 <后端>/api/upload）---- */
+  UPLOAD_URL: '',
+  UPLOAD_FIELD: 'file',
+
+  /* ---- 直连调试用（平时留空！）----
+     只有一种情况需要填：你想跳过自己的后端，让浏览器直接调中转站。
+     那种情况下密钥会出现在浏览器里，所以【只能在本机临时调试用】，
+     绝对不要带着它部署，也别提交到 git。 */
+  BASE_URL: '',          // 例如 https://grsai.dakka.com.cn
+  API_KEY: '',           // ← 平时留空
+
+  /* ---- 图片怎么发给对方（直连模式才用得到）---- */
   // 'base64' 直接内联（简单，但请求体大，有些中转站不收）
   // 'url'    先上传拿链接再发（请求体小，兼容性最好）
   // 'auto'   先试 base64，失败（413/400）自动改用上传  ← 推荐
   IMAGE_MODE: 'auto',
 
-  // 只有 IMAGE_MODE = 'url' 或 'auto' 降级时才用得到
-  UPLOAD_URL: '',                        // 例如 https://api.example.com/upload
-  UPLOAD_FIELD: 'file',                  // 上传时的表单字段名
-
   /* ---- 模型名（要跟中转站文档里完全一致）---- */
   MODELS: {
-    image: '',                           // 例如 'chatgptimage2.5'
-    video: ''
+    image: '',                           // 例如 'gpt-image-2.5'
+    video: ''                            // 例如 'minimax-h3'
   }
 };

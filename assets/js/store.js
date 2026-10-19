@@ -33,12 +33,37 @@ window.FC = window.FC || {};
       icon: 'i-video',
       w: 360,          // 加宽一点，让媒体区当主体
       aspect: 'landscape',
-      models: ['minimax-h3'],
+      // 两个平台的视频模型并列。参数约束完全不同，见下面的 modelOptions
+      models: ['minimax-h3', 'wan3.0'],
       // minimax-h3 只认 portrait(竖屏) / landscape(横屏)，不是 16:9 这种写法
       ratios: ['landscape', 'portrait'],
       styles: ['无风格', '电影感', '延时摄影', '动画', '手持'],
-      durations: ['3 秒', '5 秒', '10 秒'],
-      resolutions: ['480p', '768p', '1080p'],   // 1080p 最多 10 秒
+      // 官方文档：duration 支持 1~15 秒，但【1080p 最多 10 秒】。
+      // 所以这里列全 1~15，再由 maxDurationFor() 按分辨率砍掉超出的部分。
+      durations: ['3 秒', '5 秒', '8 秒', '10 秒', '12 秒', '15 秒'],
+      resolutions: ['480p', '768p', '1080p'],
+      /**
+       * 分辨率各自的时长上限（秒）。
+       * minimax-h3：480p / 768p 可以到 15 秒，1080p 只能到 10 秒。
+       * 没列到的分辨率不限制。
+       */
+      durationCaps: { '1080p': 10 },
+      /**
+       * 按模型覆盖参数选项 —— 两个平台的约束差得挺多：
+       *
+       *   minimax-h3（Grsai）  比例 landscape/portrait，有分辨率，1~15 秒
+       *   wan3.0（速创）       比例 16:9/9:16，【没有分辨率参数】，4~30 秒
+       *
+       * 没列到的字段就沿用上面的默认值。
+       */
+      modelOptions: {
+        'wan3.0': {
+          ratios: ['16:9', '9:16'],
+          durations: ['4 秒', '5 秒', '8 秒', '10 秒', '15 秒', '30 秒'],
+          resolutions: null,          // 它不收这个参数，界面上要隐藏
+          hint: '速创 Wan3.0 · 只收参考图的公网 URL（会自动帮你上传）· 0.3 元/秒'
+        }
+      },
       ports: { in: true, out: true },
       generateLabel: '生成视频'
     },
@@ -115,6 +140,74 @@ window.FC = window.FC || {};
     return isFinite(n) ? n : (fallback === undefined ? 0 : fallback);
   }
 
+  /** '时长 15 秒' / '15 秒' / 15 -> 15（拿不到数字返回 0） */
+  function secondsOf(v) {
+    if (typeof v === 'number') return isFinite(v) ? v : 0;
+    var m = /(\d+(?:\.\d+)?)/.exec(String(v || ''));
+    return m ? parseFloat(m[1]) : 0;
+  }
+
+  /**
+   * 取某张卡「当前模型」实际可用的参数选项。
+   *
+   * 视频卡里放了两个平台的模型（Grsai 的 minimax-h3、速创的 wan3.0），
+   * 它们的比例写法、有没有分辨率、时长范围都不一样，所以在 KINDS 里用
+   * modelOptions 按模型覆盖。没覆盖到的字段沿用卡片类型的默认值。
+   *
+   * 另外还有个「交叉约束」：minimax-h3 的时长上限取决于分辨率 ——
+   * 官方文档写的是「支持 1~15 秒，1080p 最多支持 10 秒」。
+   * 所以 durations 会按当前 resolution 再过滤一次。
+   *
+   * @returns {{ratios:string[], durations:string[]|null, resolutions:string[]|null,
+   *            styles:string[], hint:string}}
+   */
+  function optionsFor(item) {
+    var def = KINDS[(item && item.kind) || 'image-gen'] || KINDS['image-gen'];
+    var base = {
+      ratios: def.ratios || [],
+      durations: def.durations || null,
+      resolutions: def.resolutions || null,
+      styles: def.styles || [],
+      hint: '',
+      durationCaps: def.durationCaps || null
+    };
+    var ov = (def.modelOptions && item && def.modelOptions[item.model]) || null;
+    if (ov) {
+      if (ov.ratios) base.ratios = ov.ratios;
+      if ('durations' in ov) base.durations = ov.durations;
+      if ('resolutions' in ov) base.resolutions = ov.resolutions;
+      if (ov.styles) base.styles = ov.styles;
+      if (ov.hint) base.hint = ov.hint;
+      if ('durationCaps' in ov) base.durationCaps = ov.durationCaps;
+    }
+
+    // 按分辨率砍掉超出上限的时长
+    if (base.durations && base.durationCaps && item && item.resolution) {
+      var cap = base.durationCaps[item.resolution];
+      if (cap) {
+        var kept = base.durations.filter(function (d) { return secondsOf(d) <= cap; });
+        if (kept.length) base.durations = kept;
+      }
+    }
+    return base;
+  }
+
+  /** 当前分辨率下，时长最多多少秒（没限制返回 0） */
+  function maxDurationFor(item) {
+    var o = optionsFor(item);
+    if (!o.durations || !o.durations.length) return 0;
+    var mx = 0;
+    o.durations.forEach(function (d) { mx = Math.max(mx, secondsOf(d)); });
+    return mx;
+  }
+
+  /** 当前分辨率下允许的最大时长（返回 '15 秒' 这种字符串） */
+  function durationAtMax(item) {
+    var o = optionsFor(item);
+    if (!o.durations || !o.durations.length) return item.duration;
+    return o.durations[o.durations.length - 1];
+  }
+
   /* ---------- 创建卡片 ---------- */
   function createItem(kind, x, y, patch) {
     var def = KINDS[kind] || KINDS['image-gen'];
@@ -130,10 +223,12 @@ window.FC = window.FC || {};
     if (kind === 'image-gen' || kind === 'video-gen') {
       item.prompt = '';
       item.model = def.models[0];
-      item.ratio = def.aspect;
+      // 用「当前模型的选项」来定默认值，否则 wan3.0 会拿到 landscape 这种它不认的值
+      var o = optionsFor(item);
+      item.ratio = o.ratios.indexOf(def.aspect) >= 0 ? def.aspect : (o.ratios[0] || def.aspect);
       item.style = def.styles[0];
-      if (def.durations) item.duration = def.durations[1];
-      if (def.resolutions) item.resolution = def.resolutions[1];   // 视频分辨率 480p/768p/1080p
+      if (o.durations) item.duration = o.durations[1] || o.durations[0];
+      if (o.resolutions) item.resolution = o.resolutions[1] || o.resolutions[0];
       item.result = null;             // { kind, src?, seed?, w, h, createdAt, demo? }
     } else {
       item.src = '';                  // dataURL
@@ -234,13 +329,23 @@ window.FC = window.FC || {};
       } else {
         out.prompt = typeof it.prompt === 'string' ? it.prompt : '';
         out.model = def.models.indexOf(it.model) >= 0 ? it.model : def.models[0];
-        out.ratio = def.ratios.indexOf(it.ratio) >= 0 ? it.ratio : def.aspect;
+        // 先定下 model，再按这个模型的选项校验其余参数 ——
+        // 否则从 minimax-h3 切到 wan3.0 时，landscape 这种值会被当成合法的留下
+        var o = optionsFor(out);
+        out.ratio = o.ratios.indexOf(it.ratio) >= 0 ? it.ratio : (o.ratios[0] || def.aspect);
         out.style = def.styles.indexOf(it.style) >= 0 ? it.style : def.styles[0];
-        if (def.durations) {
-          out.duration = def.durations.indexOf(it.duration) >= 0 ? it.duration : def.durations[1];
+        if (o.resolutions) {
+          out.resolution = o.resolutions.indexOf(it.resolution) >= 0 ? it.resolution : (o.resolutions[0]);
         }
-        if (def.resolutions) {
-          out.resolution = def.resolutions.indexOf(it.resolution) >= 0 ? it.resolution : def.resolutions[1];
+        if (o.durations) {
+          out.duration = o.durations.indexOf(it.duration) >= 0 ? it.duration : (o.durations[0]);
+          // resolution 定下来之后再校验时长 —— 因为时长上限取决于分辨率
+          // （minimax-h3：480p/768p 可到 15 秒，1080p 最多 10 秒）。
+          // 上面 optionsFor(out) 时 out.resolution 还没赋值，所以这里要重算一次。
+          var o2 = optionsFor(out);
+          if (o2.durations.indexOf(out.duration) < 0) {
+            out.duration = durationAtMax(out);
+          }
         }
         if (it.result && typeof it.result === 'object') {
           var rs = it.result;
@@ -251,7 +356,12 @@ window.FC = window.FC || {};
             w: num(rs.w, 768),
             h: num(rs.h, 768),
             createdAt: num(rs.createdAt, Date.now()),
-            demo: !!rs.demo
+            demo: !!rs.demo,
+            // 存储状态要留着 —— 不然每次存盘再打开，「已转存到云端」的云朵
+            // 角标和「还在中转站」的警告角标都会消失
+            archived: rs.archived ? true : undefined,
+            archiveFailed: rs.archiveFailed ? true : undefined,
+            origin: typeof rs.origin === 'string' ? rs.origin : undefined
           };
           if (out.result.src === undefined && out.result.seed === undefined) out.result = null;
         }
@@ -299,6 +409,9 @@ window.FC = window.FC || {};
     KIND_ORDER: ['image-gen', 'video-gen'],
     uid: uid,
     createItem: createItem,
+    optionsFor: optionsFor,
+    maxDurationFor: maxDurationFor,
+    secondsOf: secondsOf,
     emptyDoc: emptyDoc,
     demoDoc: demoDoc,
     normalizeDoc: normalizeDoc,

@@ -14,12 +14,26 @@
     TOKEN_KEY: 'aic.token.v1',
     TIMEOUT: 20000,
 
+    /**
+     * 后端地址。所有需要密钥的调用都走这里，浏览器永不接触密钥。
+     *
+     *   本地开发   http://127.0.0.1:8778
+     *   线上部署   https://你的后端地址
+     *   同源部署   留空 —— 会自动用当前站点的 /api（推荐，免跨域）
+     *
+     * 为什么密钥不放前端：密钥能花钱。放前端 = 任何人 F12 就能拿走刷余额。
+     * 这是上线的基本要求，也是面试会看的点。
+     */
+    BACKEND_URL: 'http://127.0.0.1:8778',
+
     /* ---- 以下由 config.local.js 覆盖（那个文件不会提交到 GitHub）---- */
-    API_KEY: '',                     // 密钥只放本地，别写进这个文件
-    API_KEY_HEADER: 'Authorization',  // 有些中转站用别的头名
-    API_KEY_PREFIX: 'Bearer ',        // 有的不要前缀，填 ''
+    // 直连模式用的密钥。只在「本地临时调试」时才填；走后端时留空。
+    // 线上绝对不要填 —— 那等于把密钥发给所有人。
+    API_KEY: '',
+    API_KEY_HEADER: 'Authorization',
+    API_KEY_PREFIX: 'Bearer ',
     IMAGE_MODE: 'auto',               // 'base64' | 'url' | 'auto'
-    UPLOAD_URL: '',
+    UPLOAD_URL: '',                   // 留空则由 BACKEND_URL 推导
     UPLOAD_FIELD: 'file',
     MODELS: { image: '', video: '' }
   };
@@ -155,6 +169,23 @@
     ping: async function () {
       if (!CONFIG.USE_MOCK) return request('GET', '/health', undefined, { timeout: 5000 });
       return { ok: true, mock: true };
+    },
+
+    /* ---- 后端地址（密钥相关的调用都走这里）---- */
+    backendBase: backendBase,
+    uploadUrl: uploadUrl,
+    configError: configError,
+
+    /** 后端健康检查（含 OSS / 各家模型通道 / 限流用量） */
+    backendHealth: async function () {
+      var b = backendBase();
+      if (!b) return null;
+      try {
+        var res = await fetch(b + '/api/health', { cache: 'no-store' });
+        return await res.json();
+      } catch (e) {
+        return null;
+      }
     }
   };
 
@@ -198,8 +229,48 @@
      ========================================================================== */
 
   /** 认证头：优先用 config.local.js 里的 API_KEY，其次 localStorage 里的 token */
+  /**
+   * 后端根地址。留空就用同源（部署时前端和后端在同一个域名下最省事，也没有跨域问题）。
+   *
+   * 还会挡一种很常见的部署失误：打包脚本生成的 config.local.js 里
+   * BACKEND_URL 是个占位地址，部署的人忘了改。这时如果照发请求，
+   * 浏览器只会报一个看不懂的 CORS / DNS 错。所以这里识别出来、
+   * 记一条 configError，让界面能给出人话提示。
+   */
+  var PLACEHOLDER_RE = /把你的|填这里|你的函数|your-|example\.com|xxxx/i;
+
+  function configError() {
+    var b = String(CONFIG.BACKEND_URL || '').trim();
+    if (b && PLACEHOLDER_RE.test(b)) {
+      return 'BACKEND_URL 还是占位地址（' + b + '），请改成你自己的后端地址';
+    }
+    if (!b && location.protocol === 'file:') {
+      return '用 file:// 打开时必须显式配置 BACKEND_URL（同源推导不出来）';
+    }
+    return '';
+  }
+
+  function backendBase() {
+    var b = String(CONFIG.BACKEND_URL || '').trim();
+    // 占位地址当成"没配"，免得发出去一个必然失败的请求
+    if (b && PLACEHOLDER_RE.test(b)) return '';
+    if (b) return b.replace(/\/+$/, '');
+    // 同源：file:// 打开时没有 origin，这时只能靠显式配置
+    return (location.protocol === 'file:') ? '' : location.origin;
+  }
+
+  /** 上传接口的完整地址（没显式配 UPLOAD_URL 就由后端地址推导） */
+  function uploadUrl() {
+    if (CONFIG.UPLOAD_URL) return CONFIG.UPLOAD_URL;
+    var b = backendBase();
+    return b ? (b + '/api/upload') : '';
+  }
+
   function genHeaders() {
     var h = { 'Content-Type': 'application/json' };
+    // 走后端时不带密钥 —— 密钥在后端加。只有本地直连调试才会走下面这段。
+    var viaBackend = !!backendBase();
+    if (viaBackend) return h;
     var key = CONFIG.API_KEY || token();
     if (key) {
       var prefix = CONFIG.API_KEY_PREFIX === undefined ? 'Bearer ' : CONFIG.API_KEY_PREFIX;
@@ -211,8 +282,11 @@
   async function genFetch(method, path, body) {
     var ctrl = new AbortController();
     var timer = setTimeout(function () { ctrl.abort(); }, CONFIG.TIMEOUT);
+    var base = backendBase();
+    // 走后端：路径换成后端那套（/submit、/result），并且不再带密钥
+    var url = base ? (base + '/api/gr' + path) : (CONFIG.BASE_URL + path);
     try {
-      var res = await fetch(CONFIG.BASE_URL + path, {
+      var res = await fetch(url, {
         method: method,
         headers: genHeaders(),
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -266,30 +340,49 @@
         return { taskId: 'mock_' + FC.util.uid('t'), mock: true };
       }
 
-      var model = job.model;
-      var body = {
-        model: model,
-        prompt: job.prompt || '',
-        replyType: 'async'              // 带 progress，能驱动进度条
-      };
+      var viaBackend = !!backendBase();
 
-      // 参考图：中转站收 base64 也收 url
-      if (job.refs && job.refs.length) {
-        body.images = job.refs.map(function (r) { return r.image; }).filter(Boolean);
-      }
-
-      if (job.kind === 'video') {
-        body.aspectRatio = normalizeRatio('video', job.ratio);
-        body.resolution = job.resolution || '768p';
-        body.duration = durationNumber(job.duration);
-        if (job.seed !== undefined) body.seed = job.seed;
+      // 走后端时，body 用「画布自己的字段名」（kind/prompt/model/ratio/...），
+      // 由后端按白名单重建请求体 —— 客户端说的不算数，这样才防得住伪造请求。
+      // 直连模式（本地调试）才在这里拼中转站的字段名。
+      var body;
+      if (viaBackend) {
+        body = {
+          kind: job.kind,
+          prompt: job.prompt || '',
+          model: job.model,
+          ratio: job.ratio,
+          resolution: job.resolution,
+          duration: job.duration,
+          seed: job.seed,
+          refs: (job.refs || []).map(function (r) {
+            return { image: r.image, role: r.role, name: r.name };
+          })
+        };
       } else {
-        body.aspectRatio = normalizeRatio('image', job.ratio);
-        body.quality = 'auto';          // gpt-image-2.5 只支持 auto
+        body = {
+          model: job.model,
+          prompt: job.prompt || '',
+          replyType: 'async'
+        };
+        if (job.refs && job.refs.length) {
+          body.images = job.refs.map(function (r) { return r.image; }).filter(Boolean);
+        }
+        if (job.kind === 'video') {
+          body.aspectRatio = normalizeRatio('video', job.ratio);
+          body.resolution = job.resolution || '768p';
+          body.duration = durationNumber(job.duration);
+          if (job.seed !== undefined) body.seed = job.seed;
+        } else {
+          body.aspectRatio = normalizeRatio('image', job.ratio);
+          body.quality = 'auto';
+        }
       }
 
-      var out = await genFetch('POST', '/v1/api/generate', body);
-      if (!out || !out.id) throw ApiError(500, '响应里没有 id', '/v1/api/generate');
+      var out = await genFetch('POST', '/submit', body);
+      if (!out) throw ApiError(500, '后端没有返回内容', '/submit');
+      if (out.ok === false) throw ApiError(429, out.error || '提交失败', '/submit');
+      if (!out.id) throw ApiError(500, out.error || '响应里没有 id', '/submit');
       return { taskId: String(out.id), status: out.status };
     },
 
@@ -300,12 +393,17 @@
     poll: async function (taskId) {
       if (CONFIG.USE_MOCK) return { status: 'running', progress: 0 };
 
-      var out = await genFetch('GET', '/v1/api/result?id=' + encodeURIComponent(taskId));
+      var out = await genFetch('GET', '/result?id=' + encodeURIComponent(taskId));
       var st = String((out && out.status) || 'running');
+      // 后端和直连两种返回形状都兼容：
+      //   后端  { ok, status, progress, url, error }
+      //   直连  { status, progress, results:[{url}] }
+      var url = (out && out.url) ||
+                (out && out.results && out.results[0] && out.results[0].url) || undefined;
       return {
         status: st,
         progress: (out && isFinite(out.progress)) ? out.progress : undefined,
-        url: (out && out.results && out.results[0] && out.results[0].url) || undefined,
+        url: url,
         error: (out && out.error) || undefined
       };
     },

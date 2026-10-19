@@ -398,9 +398,48 @@
       if (!k) return;
       var cardEl = el.closest('.card');
       if (!cardEl) return;
+      var id = cardEl.dataset.id;
       var patch = {};
       patch[k] = el.value;
-      Store.update(cardEl.dataset.id, patch);
+
+      // 换模型时，其余参数要按新模型的约束重置。
+      // 两个平台的视频模型写法完全不同（minimax-h3 用 landscape / 有分辨率，
+      // wan3.0 用 16:9 / 没有分辨率 / 时长 4~30），不重置就会把上一个
+      // 模型的非法值带过去，提交时才报错。
+      if (k === 'model') {
+        var cur = Store.get(id);
+        if (cur) {
+          var probe = Object.assign({}, cur, patch);   // 用新模型算可用选项
+          var o = Store.optionsFor(probe);
+          if (o.ratios.indexOf(cur.ratio) < 0) patch.ratio = o.ratios[0];
+          if (o.durations && o.durations.indexOf(cur.duration) < 0) {
+            patch.duration = o.durations[o.durations.length - 1];
+          }
+          if (o.resolutions && o.resolutions.indexOf(cur.resolution) < 0) {
+            patch.resolution = o.resolutions[0];
+          }
+        }
+      }
+
+      // 换分辨率时，时长可能要跟着降级 ——
+      // minimax-h3 官方限制：480p/768p 能到 15 秒，1080p 最多 10 秒。
+      // 不处理的话，用户选着 15 秒再切到 1080p，就会带着非法组合提交。
+      if (k === 'resolution') {
+        var cur2 = Store.get(id);
+        if (cur2 && Store.maxDurationFor) {
+          var probe2 = Object.assign({}, cur2, patch);
+          var maxSec = Store.maxDurationFor(probe2);
+          var curSec = Store.secondsOf(cur2.duration);
+          if (maxSec && curSec > maxSec) {
+            // 降到该分辨率允许的最大时长
+            var o2 = Store.optionsFor(probe2);
+            patch.duration = o2.durations[o2.durations.length - 1];
+            FC.ui.toast('1080p 最长只能 10 秒，已把时长改成 ' + patch.duration, 'i-clock');
+          }
+        }
+      }
+
+      Store.update(id, patch);
       // 比例变了，卡片高度会自动跟着变，重新测量
       R.requestItems();
     });
@@ -1138,6 +1177,64 @@
     }, true);
   }
 
+  /* ==========================================================================
+     自动转存：生成结果从中转站搬到你自己的 OSS
+     --------------------------------------------------------------------------
+     为什么必须做这件事：
+       中转站的图床是临时的。实测生成后约 4 小时，同一个地址就从
+       HTTP 200（2.3MB）变成 HTTP 404 —— 画布上的图集体失效。
+       而它的文档里根本没提文件保留多久，属于未文档化行为。
+
+     怎么做的：
+       生成成功后卡片立刻用中转站地址显示（你马上能看到结果），
+       然后后台把文件搬到你的 OSS，搬完了把卡片地址换成 OSS 的。
+       OSS 上的是永久的，以后打开画布不会再坏。
+
+     注意走的是 {url: ...} 模式 —— 让后端直接去抓中转站的文件再传 OSS，
+     文件不经过浏览器（大视频走 base64 会非常慢，还可能超限）。
+     ========================================================================== */
+
+  /** 这个地址是不是已经在你自己的 OSS 上了 */
+  function isOssUrl(src) {
+    var s = String(src || '');
+    // 阿里云 OSS 的默认域名长这样：bucket.oss-cn-xxx.aliyuncs.com
+    if (/\.aliyuncs\.com\//i.test(s)) return true;
+    // 如果配了自定义域名，也算
+    var custom = (FC.api && FC.api.config && FC.api.config.OSS_CUSTOM_DOMAIN) || '';
+    if (custom && s.indexOf(custom) === 0) return true;
+    return false;
+  }
+
+  /**
+   * 把一张生成结果转存到自己的 OSS。
+   * @returns {Promise<string|null>} 成功返回 OSS 地址，失败/不需要返回 null
+   */
+  async function archiveToCloud(src, name) {
+    var endpoint = (FC.api && FC.api.uploadUrl) ? FC.api.uploadUrl() : '';
+    if (!endpoint || !src) return null;
+    // 已经在自己 OSS 上了就别重复传
+    if (isOssUrl(src)) return null;
+    // blob: / data: 是本地的，没什么可"转存"的
+    if (/^(blob:|data:)/i.test(src)) return null;
+
+    try {
+      var r = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: src, name: name || '生成结果' })
+      });
+      var out = null;
+      try { out = await r.json(); } catch (e) { out = null; }
+      if (!r.ok || !out || !out.ok) {
+        throw new Error((out && out.error) || ('HTTP ' + r.status));
+      }
+      return out.url || null;
+    } catch (e) {
+      console.warn('[archive] 转存失败，结果仍留在中转站（会过期）', e);
+      return null;
+    }
+  }
+
   /** src 可以是 https: / blob: / data: —— 都会走 fetch 拿成 Blob 再下载 */
   async function downloadImage(src, baseName) {
     if (!src) { toast('这张图还没有内容', 'i-close'); return false; }
@@ -1176,9 +1273,9 @@
      前提：本机跑着 upload_server.py，且 config.local.js 里 UPLOAD_URL 指向它。
      ========================================================================== */
   async function uploadToCloud(src, name, item) {
-    var endpoint = (FC.api && FC.api.config && FC.api.config.UPLOAD_URL) || '';
+    var endpoint = (FC.api && FC.api.uploadUrl) ? FC.api.uploadUrl() : '';
     if (!endpoint) {
-      toast('没配上传服务：请在 config.local.js 里填 UPLOAD_URL', 'i-close');
+      toast('没配后端地址：请在 config.local.js 里填 BACKEND_URL', 'i-close');
       return null;
     }
 
@@ -1505,6 +1602,8 @@
     refreshHistoryBadge: refreshHistoryBadge,
     downloadImage: downloadImage,
     uploadToCloud: uploadToCloud,
+    archiveToCloud: archiveToCloud,
+    isOssUrl: isOssUrl,
     openViewer: openViewer,
     closeViewer: closeViewer,
     importFiles: importFiles,

@@ -78,15 +78,24 @@ CFG = {
     'OSS_BUCKET': os.environ.get('OSS_BUCKET', ''),
     'OSS_PREFIX': os.environ.get('OSS_PREFIX', 'ai-canvas/'),
     'PORT': int(os.environ.get('UPLOAD_PORT', '8778')),
-    'MAX_UPLOAD_BYTES': 20 * 1024 * 1024,
+    # 视频比图大得多（1080p 10 秒可能几十 MB），所以给宽一点。
+    # 走 {url:...} 模式时文件不经过浏览器，只是本机内存里过一下，100MB 没问题。
+    'MAX_UPLOAD_BYTES': 100 * 1024 * 1024,
     'USE_HTTPS': True,
     'CUSTOM_DOMAIN': '',
 }
 
 
+# 本文件所在目录。
+# 两个用途：读 config.*.local.py，以及让 `import wan3` 能找到同目录的 wan3.py。
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+
 def load_config():
     """读 config.oss.local.py（不存在也不报错，环境变量就够了）"""
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = BASE_DIR
     path = os.path.join(here, 'config.oss.local.py')
     if not os.path.isfile(path):
         return False
@@ -265,12 +274,173 @@ def do_upload(body):
 # HTTP
 # ---------------------------------------------------------------------------
 
+def route(method, path, query, body, client_ip):
+    """
+    路由分发 —— 与传输层无关。
+
+    这一层是「业务逻辑」，不关心请求是从哪来的。上面那个 http.server 的
+    Handler 只是它在本机的一个适配器；部署到阿里云函数计算时，
+    fc_handler.py 是另一个适配器，两边共用同一份路由和校验逻辑。
+
+    @param method     'GET' / 'POST'
+    @param path       不带查询串的路径，如 '/api/health'
+    @param query      dict（已经 parse_qs 过），如 {'id': ['xxx']}
+    @param body       POST 的 JSON dict（GET 传 None）
+    @param client_ip  客户端真实 IP，用于限流
+    @returns (status:int, payload:dict)
+    """
+    qs = query or {}
+
+    # ============================ GET ============================
+    if method == 'GET':
+
+        if path == '/api/health':
+            ready, missing = config_ready()
+            info = {
+                'ok': ready,
+                'oss_configured': ready,
+                'missing': missing,
+                'bucket': CFG['OSS_BUCKET'] or None,
+                'endpoint': CFG['OSS_ENDPOINT'] or None,
+                'prefix': CFG['OSS_PREFIX'],
+            }
+            if ready:
+                try:
+                    get_bucket().get_bucket_info()
+                    info['oss_reachable'] = True
+                except Exception as e:
+                    info['ok'] = False
+                    info['oss_reachable'] = False
+                    info['error'] = str(e)
+            # 两边模型通道配好没有
+            try:
+                import wan3
+                cfg, err = wan3.get_config(BASE_DIR)
+                info['wan3_configured'] = bool(cfg)
+                if err:
+                    info['wan3_error'] = err
+            except Exception as e:
+                info['wan3_configured'] = False
+                info['wan3_error'] = str(e)
+            try:
+                import grsai
+                cfg2, err2 = grsai._load_cfg(BASE_DIR)
+                info['grsai_configured'] = bool(cfg2)
+                if err2:
+                    info['grsai_error'] = err2
+            except Exception as e:
+                info['grsai_configured'] = False
+                info['grsai_error'] = str(e)
+            try:
+                import ratelimit
+                info['limits'] = ratelimit.snapshot()
+            except Exception as e:
+                info['limits_error'] = str(e)
+            return (200 if info['ok'] else 503), info
+
+        # ---- Grsai 结果查询（转发）----
+        if path == '/api/gr/result':
+            try:
+                import grsai
+                cfg, err = grsai._load_cfg(BASE_DIR)
+                if not cfg:
+                    return 400, {'ok': False, 'error': err}
+                tid = (qs.get('id') or [''])[0]
+                return 200, grsai.result(cfg, tid)
+            except Exception as e:
+                return 500, {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+
+        # ---- 速创 Wan3.0 结果查询（转发）----
+        if path == '/api/wy/detail':
+            try:
+                import wan3
+                cfg, err = wan3.get_config(BASE_DIR)
+                if not cfg:
+                    return 400, {'ok': False, 'error': err}
+                tid = (qs.get('id') or [''])[0]
+                return 200, wan3.detail(cfg, tid)
+            except Exception as e:
+                return 500, {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+
+        if path in ('/', '/index.html'):
+            return 200, {
+                'service': 'ai-canvas backend',
+                'endpoints': [
+                    'GET  /api/health',
+                    'POST /api/upload       图片转存到 OSS',
+                    'POST /api/gr/submit    Grsai 生图/视频提交（密钥在后端）',
+                    'GET  /api/gr/result?id= Grsai 查结果',
+                    'POST /api/wy/submit    速创 Wan3.0 提交',
+                    'GET  /api/wy/detail?id= 速创 Wan3.0 查结果',
+                ],
+            }
+        return 404, {'ok': False, 'error': 'not found'}
+
+    # ============================ POST ============================
+    if method == 'POST':
+        try:
+            if path == '/api/upload':
+                return 200, do_upload(body or {})
+
+            # ---- Grsai 提交（转发 + 限流）----
+            if path == '/api/gr/submit':
+                import grsai
+                import ratelimit
+                body = body or {}
+                is_video = str(body.get('kind')) == 'video'
+                # 限流：前端能被绕过，后端不能
+                allowed, why, retry = ratelimit.check(client_ip, is_video)
+                if not allowed:
+                    return 429, {'ok': False, 'error': why, 'retryAfter': retry}
+                cfg, err = grsai._load_cfg(BASE_DIR)
+                if not cfg:
+                    return 400, {'ok': False, 'error': err}
+                return 200, grsai.submit(cfg, body)
+
+            # ---- 速创 Wan3.0 提交（转发 + 限流）----
+            if path == '/api/wy/submit':
+                import ratelimit
+                import wan3
+                allowed, why, retry = ratelimit.check(client_ip, True)
+                if not allowed:
+                    return 429, {'ok': False, 'error': why, 'retryAfter': retry}
+                cfg, err = wan3.get_config(BASE_DIR)
+                if not cfg:
+                    return 400, {'ok': False, 'error': err}
+                return 200, wan3.submit(cfg, body or {})
+
+            return 404, {'ok': False, 'error': 'not found'}
+        except ValueError as e:
+            return 400, {'ok': False, 'error': str(e)}
+        except urllib.error.HTTPError as e:
+            return 400, {'ok': False, 'error': '抓取远程文件失败：HTTP %s' % e.code}
+        except Exception as e:
+            return 500, {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+
+    return 405, {'ok': False, 'error': 'method not allowed'}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'ai-canvas-upload/1.0'
 
     def log_message(self, fmt, *args):
         sys.stderr.write('  [upload] %s - %s\n' % (self.address_string(), fmt % args))
+
+    def _client_ip(self):
+        """
+        取客户端 IP。部署在反向代理 / 函数计算后面时，真实 IP 在
+        X-Forwarded-For 的第一段（最左边那个是原始客户端）。
+        """
+        xff = self.headers.get('X-Forwarded-For') or ''
+        if xff:
+            first = xff.split(',')[0].strip()
+            if first:
+                return first
+        real = self.headers.get('X-Real-IP')
+        if real:
+            return real.strip()
+        return self.client_address[0] if self.client_address else 'unknown'
 
     # ---- 工具 ----
     def _send(self, code, payload, ctype='application/json; charset=utf-8'):
@@ -309,49 +479,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(204, b'', 'text/plain')
 
     def do_GET(self):
-        path = self.path.split('?')[0]
-        if path == '/api/health':
-            ready, missing = config_ready()
-            info = {
-                'ok': ready,
-                'oss_configured': ready,
-                'missing': missing,
-                'bucket': CFG['OSS_BUCKET'] or None,
-                'endpoint': CFG['OSS_ENDPOINT'] or None,
-                'prefix': CFG['OSS_PREFIX'],
-            }
-            if ready:
-                try:
-                    get_bucket().get_bucket_info()
-                    info['oss_reachable'] = True
-                except Exception as e:
-                    info['ok'] = False
-                    info['oss_reachable'] = False
-                    info['error'] = str(e)
-            return self._send(200 if info['ok'] else 503, info)
-
-        if path in ('/', '/index.html'):
-            return self._send(200, {
-                'service': 'ai-canvas upload',
-                'endpoints': ['GET /api/health', 'POST /api/upload'],
-            })
-        return self._send(404, {'ok': False, 'error': 'not found'})
+        self._dispatch('GET')
 
     def do_POST(self):
+        self._dispatch('POST')
+
+    def _dispatch(self, method):
+        """
+        本机 HTTP 适配器：把请求交给 route()，再把结果写回响应。
+        业务逻辑全在 route() 里，部署到函数计算时换成另一个适配器即可。
+        """
         path = self.path.split('?')[0]
-        if path != '/api/upload':
-            return self._send(404, {'ok': False, 'error': 'not found'})
+        qs = urllib.parse.parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
         try:
-            body = self._read_json()
-            result = do_upload(body)
-            return self._send(200, result)
+            body = self._read_json() if method == 'POST' else None
         except ValueError as e:
             return self._send(400, {'ok': False, 'error': str(e)})
-        except urllib.error.HTTPError as e:
-            return self._send(400, {'ok': False,
-                                    'error': '抓取远程图片失败：HTTP %s' % e.code})
-        except Exception as e:
-            return self._send(500, {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
+        code, payload = route(method, path, qs, body, self._client_ip())
+        return self._send(code, payload)
+
 
 
 def main():

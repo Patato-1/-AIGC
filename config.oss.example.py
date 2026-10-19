@@ -39,7 +39,7 @@ OSS_PREFIX = 'ai-canvas/'
 PORT = 8778
 
 # 单张图最大多少字节（默认 20MB）
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 # URL 用不用 HTTPS（一般不用改）
 USE_HTTPS = True

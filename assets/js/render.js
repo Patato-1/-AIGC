@@ -268,14 +268,20 @@
   function updateGen(el, item) {
     var def = Store.kindDef(item.kind);
     var isVideo = item.kind === 'video-gen';
+    // 参数选项按「当前模型」取 —— 视频卡里 minimax-h3 和 wan3.0 的
+    // 比例写法、有没有分辨率、时长范围都不一样
+    var o = Store.optionsFor(item);
 
-    // 下拉框（首次填充）
+    // 下拉框
     fillSelect(el.querySelector('[data-k="model"]'), def.models, item.model);
-    fillSelect(el.querySelector('[data-k="ratio"]'), def.ratios, item.ratio);
-    fillSelect(el.querySelector('[data-k="style"]'), def.styles, item.style);
+    fillSelect(el.querySelector('[data-k="ratio"]'), o.ratios, item.ratio);
+    fillSelect(el.querySelector('[data-k="style"]'), o.styles, item.style);
     if (isVideo) {
-      fillSelect(el.querySelector('[data-k="duration"]'), def.durations, item.duration);
-      fillSelect(el.querySelector('[data-k="resolution"]'), def.resolutions, item.resolution);
+      fillSelect(el.querySelector('[data-k="duration"]'), o.durations, item.duration);
+      fillSelect(el.querySelector('[data-k="resolution"]'), o.resolutions, item.resolution);
+      // 没有分辨率的模型（如 wan3.0）就把那一格藏起来
+      var resSel = el.querySelector('[data-k="resolution"]');
+      if (resSel) resSel.hidden = !o.resolutions;
     }
 
     // 提示词（不要打断正在输入的文本框）
@@ -308,6 +314,9 @@
 
   function fillSelect(sel, options, value) {
     if (!sel) return;
+    // options 可能是 null —— 比如 wan3.0 没有分辨率参数（modelOptions 里显式写了 null）。
+    // 不兜底就会在 options.join 上崩，后面「隐藏这一格」的代码也执行不到。
+    options = options || [];
     var key = options.join(',');
     if (sel._key !== key) {
       sel._key = key;
@@ -315,7 +324,7 @@
         return '<option value="' + esc(o) + '">' + esc(o) + '</option>';
       }).join('');
     }
-    if (sel.value !== value && value !== undefined) sel.value = value;
+    if (value !== undefined && value !== null && sel.value !== value) sel.value = value;
   }
 
   /* ---------- 舞台 ---------- */
@@ -324,9 +333,12 @@
     var busy = Store.runtime.progress[item.id];
     var res = item.result;
 
-    // 用 key 判断是否需要重建，避免每帧重画
+    // 用 key 判断是否需要重建，避免每帧重画。
+    // 注意：存储状态角标（archived / archiveFailed）也要进 key ——
+    // 转存完成后只改这两个字段、src 不变，不进 key 的话角标永远画不出来。
     var key = busy ? 'busy:' + busy.pct
-      : res ? 'res:' + (res.src || ('seed' + res.seed)) + ':' + res.w + 'x' + res.h
+      : res ? 'res:' + (res.src || ('seed' + res.seed)) + ':' + res.w + 'x' + res.h +
+              ':' + (res.archived ? 'A' : '') + (res.archiveFailed ? 'F' : '')
         : 'empty';
 
     if (stage._key === key) return;
@@ -388,6 +400,18 @@
       }
     }
     if (res.demo) html += '<span class="stage__badge">DEMO</span>';
+
+    // 存储状态角标：
+    //   已转存到自己 OSS  → 小云朵（永久有效，放心）
+    //   没转存成功        → 中转站图标 + 提示（几小时后可能失效）
+    if (res.archived) {
+      html += '<span class="stage__store stage__store--safe" title="已转存到你的云端，永久有效">' +
+        '<svg class="ico"><use href="#i-cloud"/></svg></span>';
+    } else if (res.archiveFailed && res.src) {
+      html += '<span class="stage__store stage__store--warn" ' +
+        'title="没能转存到云端，这张图还留在中转站（几小时后可能失效）。右键可手动上传到云端">' +
+        '<svg class="ico"><use href="#i-clock"/></svg></span>';
+    }
     stage.innerHTML = html;
 
     // 悬停预览：鼠标移上去就播，移开就停并回到第一帧
