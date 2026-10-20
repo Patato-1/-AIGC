@@ -355,6 +355,22 @@ def route(method, path, query, body, client_ip):
     """
     qs = query or {}
 
+    # ============================ OPTIONS ============================
+    # 浏览器跨域预检。前端如果托管在别的域名（例如 GitHub Pages），
+    # 带 JSON body 的 POST 会先发 OPTIONS，预检不过浏览器会直接拦掉真正的请求。
+    # 本机适配器有自己的 do_OPTIONS，但函数计算走的是 route()，不处理就会返回 405。
+    if method == 'OPTIONS':
+        return 204, {
+            '_raw': b'',
+            '_ctype': 'text/plain; charset=utf-8',
+            '_headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': '*',
+                'Access-Control-Max-Age': '86400',
+            },
+        }
+
     # ============================ GET ============================
     if method == 'GET':
 
