@@ -44,6 +44,7 @@ __pycache__/
 venv/
 
 # ---- 打包产物（build_deploy.py 生成，不该入库）----
+www/
 deploy/
 *.zip
 

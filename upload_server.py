@@ -130,16 +130,23 @@ _bucket = None
 
 
 def get_bucket():
+    """
+    取 OSS 客户端（单例）。
+
+    用的是自己写的 oss_client（纯标准库），不是官方 oss2 —— 因为 oss2 的
+    依赖链里有 C 扩展，导致「在 Windows 上打不出能跑在 Linux 函数计算上的包」。
+    我们只用到上传和查 Bucket 两个操作，签名本身 HMAC-SHA1 + Base64 就够，
+    标准库全都有。去掉这个依赖之后，后端变成零第三方依赖，
+    部署的 zip 传到哪都能直接跑。
+    """
     global _bucket
     if _bucket is not None:
         return _bucket
-    try:
-        import oss2
-    except ImportError:
-        raise RuntimeError('没装 oss2。执行：python -m pip install oss2')
-
-    auth = oss2.Auth(CFG['OSS_ACCESS_KEY_ID'], CFG['OSS_ACCESS_KEY_SECRET'])
-    _bucket = oss2.Bucket(auth, CFG['OSS_ENDPOINT'], CFG['OSS_BUCKET'])
+    import oss_client
+    _bucket = oss_client.OSSClient(
+        CFG['OSS_ACCESS_KEY_ID'], CFG['OSS_ACCESS_KEY_SECRET'],
+        CFG['OSS_ENDPOINT'], CFG['OSS_BUCKET'],
+        use_https=bool(CFG.get('USE_HTTPS', True)))
     return _bucket
 
 
@@ -258,7 +265,7 @@ def do_upload(body):
                             uuid.uuid4().hex[:8], ext)
 
     bucket = get_bucket()
-    bucket.put_object(key, raw, headers={'Content-Type': mime or 'application/octet-stream'})
+    bucket.put_object(key, raw, content_type=mime or 'application/octet-stream')
 
     return {
         'ok': True,
@@ -273,6 +280,63 @@ def do_upload(body):
 # ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
+
+def static_file(path):
+    """
+    从 www/ 目录提供静态文件（前端）。
+    找不到返回 None，交给后面的 API 路由处理。
+
+    为什么需要它：阿里云 OSS 现在给所有对象加 x-oss-force-download: true，
+    浏览器打开 index.html 会变成「下载文件」而不是显示网页，静态网站托管
+    因此没法直接用（对象级设 Content-Disposition 也覆盖不了）。
+    让后端顺便把前端发出去就绕开了，而且前后端同源、没有跨域问题。
+
+    安全：路径做规范化，禁止跳出 www/（防目录穿越）。
+    """
+    import mimetypes as _mt
+
+    root = os.path.join(BASE_DIR, 'www')
+    if not os.path.isdir(root):
+        return None
+
+    rel = urllib.parse.unquote(path.lstrip('/'))
+    if rel in ('', '/'):
+        rel = 'index.html'
+    # 目录形式：/foo/ -> /foo/index.html
+    if rel.endswith('/'):
+        rel += 'index.html'
+
+    # 规范化，挡住 .. 之类的穿越尝试
+    full = os.path.normpath(os.path.join(root, rel))
+    if not full.startswith(os.path.normpath(root)):
+        return 404, {'ok': False, 'error': 'not found'}
+    if not os.path.isfile(full):
+        return None
+
+    try:
+        with open(full, 'rb') as f:
+            data = f.read()
+    except Exception:
+        return None
+
+    ctype = _mt.guess_type(full)[0] or 'application/octet-stream'
+    if ctype.startswith('text/') or ctype in ('application/javascript', 'application/json'):
+        ctype += '; charset=utf-8'
+
+    # 静态资源可以直接缓存，但 index.html / config 不缓存（改了要立刻生效）
+    base = os.path.basename(full)
+    cache = 'no-store' if base.endswith('.html') or base.startswith('config.') \
+        else 'public, max-age=3600'
+
+    return (200, {
+        '_raw': data,
+        '_ctype': ctype,
+        '_headers': {
+            'Content-Disposition': 'inline',
+            'Cache-Control': cache,
+        },
+    })
+
 
 def route(method, path, query, body, client_ip):
     """
@@ -294,6 +358,16 @@ def route(method, path, query, body, client_ip):
     # ============================ GET ============================
     if method == 'GET':
 
+        # ---- 静态文件（把前端也由这个服务提供）----
+        # 为什么放在这里：阿里云 OSS 现在对所有对象返回
+        # x-oss-force-download: true，浏览器打开 index.html 会变成下载文件，
+        # 静态网站托管因此没法直接用。让后端顺便把前端发出去，
+        # 就绕开了这个问题，而且前后端同源、没有跨域。
+        if not path.startswith('/api/'):
+            hit = static_file(path)
+            if hit is not None:
+                return hit
+
         if path == '/api/health':
             ready, missing = config_ready()
             info = {
@@ -306,7 +380,7 @@ def route(method, path, query, body, client_ip):
             }
             if ready:
                 try:
-                    get_bucket().get_bucket_info()
+                    get_bucket().bucket_info()
                     info['oss_reachable'] = True
                 except Exception as e:
                     info['ok'] = False
@@ -496,7 +570,29 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             return self._send(400, {'ok': False, 'error': str(e)})
         code, payload = route(method, path, qs, body, self._client_ip())
+        # 静态文件返回的是 {'_raw': bytes, '_ctype':..., '_headers': {...}}
+        if isinstance(payload, dict) and '_raw' in payload:
+            return self._send_raw(
+                code, payload['_raw'],
+                payload.get('_ctype') or 'application/octet-stream',
+                payload.get('_headers') or {})
         return self._send(code, payload)
+
+    def _send_raw(self, code, data, ctype, extra_headers=None):
+        """发原始字节（静态文件用）"""
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except Exception:
+            pass
 
 
 

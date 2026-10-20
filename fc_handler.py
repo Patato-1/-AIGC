@@ -84,10 +84,105 @@ def _lower_headers(h):
     return {str(k).lower(): v for k, v in (h or {}).items()}
 
 
+def _parse_event(event):
+    """
+    把 event 弄成 dict。
+
+    有的运行时会把它作为 JSON 字符串传进来，而不是已经解析好的对象 ——
+    如果不处理，后面所有 event.get / in 判断都会静默失败，
+    表现是「所有路径都返回同一个响应」，非常难查。
+    """
+    if event is None:
+        return {}
+    if isinstance(event, (bytes, bytearray)):
+        try:
+            event = event.decode('utf-8')
+        except Exception:
+            return {}
+    if isinstance(event, str):
+        try:
+            event = json.loads(event)
+        except Exception:
+            return {}
+    return event if isinstance(event, dict) else {}
+
+
+def _diag(event):
+    """
+    收集 event 的结构信息（只有键名和类型，不含任何值）。
+
+    函数计算的 event 结构各版本有差异，当路由解析不出来时，把这份信息
+    带在响应里，一次调用就能看出真实结构，不用去翻日志。
+    键名和类型不涉及密钥，可以安全返回。
+    """
+    if not isinstance(event, dict):
+        return {'eventType': type(event).__name__}
+    info = {'keys': sorted(event.keys())}
+    for k in ('rawPath', 'path', 'httpMethod', 'version', 'isBase64Encoded'):
+        if k in event:
+            v = event[k]
+            info[k] = v if isinstance(v, (str, int, bool)) else '<%s>' % type(v).__name__
+    for holder in ('requestContext', 'http', 'request'):
+        v = event.get(holder)
+        if isinstance(v, dict):
+            info[holder + '.keys'] = sorted(v.keys())
+            inner = v.get('http') if holder == 'requestContext' else None
+            if isinstance(inner, dict):
+                info['requestContext.http.keys'] = sorted(inner.keys())
+    return info
+
+
+def _resolve_path(event):
+    """
+    从 event 里找出请求路径。
+
+    不同版本 / 不同触发器的字段名不一样，所以按可能性依次尝试。
+    返回 (path, source)，source 用来说明这条路径是从哪个字段拿到的 ——
+    它也是「结构没猜对」的探测器：如果 source 是 'default'，
+    说明所有字段都没匹配上，该看诊断信息了。
+    """
+    def _get(e, *path_parts):
+        cur = e
+        for part in path_parts:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(part)
+        return cur
+
+    candidates = [
+        ('rawPath', lambda e: _get(e, 'rawPath')),
+        ('path', lambda e: _get(e, 'path')),
+        ('requestContext.http.path', lambda e: _get(e, 'requestContext', 'http', 'path')),
+        ('requestContext.path', lambda e: _get(e, 'requestContext', 'path')),
+        ('http.path', lambda e: _get(e, 'http', 'path')),
+        ('request.path', lambda e: _get(e, 'request', 'path')),
+    ]
+    for name, get in candidates:
+        try:
+            v = get(event)
+        except Exception:
+            v = None
+        if v:
+            return str(v).split('?')[0], name
+    return '/', 'default'
+
+
 def handler(event, context):
     """阿里云函数计算入口"""
     if event is None:
         event = {}
+
+    # 有的运行时把 event 作为 JSON 字符串传进来，先统一成 dict
+    event = _parse_event(event)
+
+    if not event:
+        return {
+            'statusCode': 400,
+            'headers': {'Content-Type': 'application/json; charset=utf-8'},
+            'body': json.dumps({'ok': False,
+                                'error': '收到空的 event（函数计算的输入结构可能变了）'},
+                               ensure_ascii=False),
+        }
 
     # 大部分 FC 版本限制单次请求体大小，超过会在平台层就被拦掉
     headers = _lower_headers(_first(event, 'headers') or {})
@@ -95,8 +190,7 @@ def handler(event, context):
     method = (_first(event, 'httpMethod', 'requestContext.http.method',
                      'requestContext.httpMethod') or 'GET').upper()
 
-    path = _first(event, 'rawPath', 'path', 'requestContext.http.path') or '/'
-    path = str(path).split('?')[0]
+    path, path_src = _resolve_path(event)
 
     # 查询串
     query = _first(event, 'queryString', 'queryParameters',
@@ -130,20 +224,55 @@ def handler(event, context):
 
     client_ip = _client_ip(event, headers)
 
+    # 诊断：如果路径是从默认值来的（说明字段名都没匹配上），
+    # 或者显式带了 ?debug=1，就把 event 的结构附在响应里。
+    # 这样一次调用就能看出函数计算实际传的是什么结构，不用去翻日志。
+    want_debug = (path_src == 'default') or (query.get('debug') == ['1'])
+
     try:
         code, payload = upload_server.route(method, path, query, body, client_ip)
     except Exception as e:
         code = 500
         payload = {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
 
+    if want_debug and isinstance(payload, dict) and '_raw' not in payload:
+        payload['_debug'] = {
+            'resolvedPath': path,
+            'pathSource': path_src,
+            'method': method,
+            'event': _diag(event),
+        }
+
+    # 基础响应头
+    # Content-Disposition: inline 是必须的 —— 函数计算的 HTTP 触发器默认
+    # 会给响应加 attachment，浏览器打开网页会变成「下载文件」而不是显示。
+    # 我们自己声明 inline 把它盖掉（静态文件和 API 都要，否则前端加载不了）。
+    headers = {
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'no-store',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    }
+
+    # 静态文件：payload 是 {'_raw': bytes, '_ctype': ..., '_headers': {...}}
+    if isinstance(payload, dict) and '_raw' in payload:
+        headers['Content-Type'] = payload.get('_ctype') or 'application/octet-stream'
+        headers.update(payload.get('_headers') or {})
+        body_out = payload['_raw']
+        if isinstance(body_out, (bytes, bytearray)):
+            body_out = base64.b64encode(bytes(body_out)).decode('ascii')
+            return {
+                'statusCode': code,
+                'headers': headers,
+                'body': body_out,
+                'isBase64Encoded': True,
+            }
+        return {'statusCode': code, 'headers': headers, 'body': body_out}
+
+    headers['Content-Type'] = 'application/json; charset=utf-8'
     return {
         'statusCode': code,
-        'headers': {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        },
+        'headers': headers,
         'body': json.dumps(payload, ensure_ascii=False),
     }

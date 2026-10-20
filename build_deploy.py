@@ -36,11 +36,36 @@ OUT = os.path.join(BASE, 'deploy')
 BACKEND_FILES = [
     'fc_handler.py',          # 云函数入口
     'upload_server.py',       # route() 业务逻辑
+    'oss_client.py',          # OSS 客户端（纯标准库，零依赖）
     'grsai.py',               # Grsai 转发
     'wan3.py',                # 速创转发
     'ratelimit.py',           # 限流
-    'requirements.txt',       # 依赖
+    'requirements.txt',       # 依赖清单（空的 —— 零依赖）
 ]
+
+# 前端文件也要打进后端包 —— 放在 www/ 目录下，由后端顺便发出去。
+#
+# 为什么这么做：阿里云 OSS 现在给所有对象加 x-oss-force-download: true，
+# 浏览器打开 index.html 变成「下载文件」，静态网站托管没法直接用。
+# 让后端把前端一起发出去就绕开了，而且前后端同源、没有跨域问题。
+WWW_DIR = 'www'
+WWW_CONFIG = """/* ==========================================================================
+   config.local.js —— 由后端提供的版本（同源部署）
+   --------------------------------------------------------------------------
+   前端和后端是同一个域名，所以 BACKEND_URL 留空即可 ——
+   api.js 会自动用当前站点的 origin，不需要写死地址。
+   没有密钥。
+   ========================================================================== */
+window.FC = window.FC || {};
+
+window.FC.LOCAL = {
+  USE_MOCK: false,
+  BACKEND_URL: '',            // 留空 = 同源，自动用当前站点
+  UPLOAD_URL: '',
+  UPLOAD_FIELD: 'file',
+  MODELS: { image: 'gpt-image-2.5', video: 'minimax-h3' }
+};
+"""
 
 # ---------------------------------------------------------------------------
 # 前端：HTML + 静态资源
@@ -48,6 +73,7 @@ BACKEND_FILES = [
 FRONTEND_FILES = [
     'index.html',
     'config.example.js',
+    'config.deploy.js',
 ]
 FRONTEND_DIRS = [
     'assets',
@@ -95,17 +121,44 @@ def _fail(msg):
 
 
 def build_backend():
-    """打包后端（给函数计算）"""
+    """
+    打包后端（给函数计算）。
+
+    除了 Python 代码，还带上 www/ —— 前端也由这个函数发出去，
+    这样就不用依赖 OSS 的静态网站托管（它现在会强制下载）。
+    """
     path = os.path.join(OUT, 'ai-canvas-backend.zip')
     missing = [f for f in BACKEND_FILES if not os.path.isfile(os.path.join(BASE, f))]
     if missing:
         _fail('缺少文件: %s' % ', '.join(missing))
         return None
 
+    n_www = 0
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         for f in BACKEND_FILES:
             z.write(os.path.join(BASE, f), f)
-    return path
+
+        # ---- www/ ：前端一起打进去 ----
+        for f in ('index.html',):
+            src = os.path.join(BASE, f)
+            if os.path.isfile(src):
+                z.write(src, WWW_DIR + '/' + f)
+                n_www += 1
+        for d in ('assets',):
+            root = os.path.join(BASE, d)
+            if not os.path.isdir(root):
+                continue
+            for cur, _dirs, files in os.walk(root):
+                for fn in files:
+                    full = os.path.join(cur, fn)
+                    rel = os.path.relpath(full, BASE).replace('\\', '/')
+                    z.write(full, WWW_DIR + '/' + rel)
+                    n_www += 1
+        # 同源配置（BACKEND_URL 留空 = 自动用当前站点）
+        z.writestr(WWW_DIR + '/config.local.js', WWW_CONFIG)
+        n_www += 1
+
+    return path, n_www
 
 
 def build_frontend():
@@ -156,7 +209,11 @@ def audit(zip_path, allow_frontend_stub=False):
             names.append(info.filename)
             base = os.path.basename(info.filename)
             if base in FORBIDDEN:
-                if not (allow_frontend_stub and base == 'config.local.js'):
+                # www/config.local.js 是【故意】生成的无密钥配置（同源部署用），
+                # 文件名本身不算问题，但内容照样会被下面的密钥扫描检查
+                is_www_stub = (allow_frontend_stub or info.filename.startswith('www/')) \
+                    and base == 'config.local.js'
+                if not is_www_stub:
                     problems.append('包含密钥配置: %s' % info.filename)
             if base.endswith('.pyc') or '__pycache__' in info.filename:
                 problems.append('包含缓存文件: %s' % info.filename)
@@ -197,15 +254,18 @@ def main():
 
     # ---- 后端 ----
     print('【后端】给阿里云函数计算')
-    be = build_backend()
+    be, n_www = build_backend()
     if not be:
         return 1
     names, problems = audit(be)
     print('  %s  (%d 个文件, %.1f KB)' % (
         os.path.basename(be), len(names),
         os.path.getsize(be) / 1024.0))
+    print('     其中 www/ 里有 %d 个前端文件（由后端一起发出去）' % n_www)
+    print('     代码文件:')
     for n in sorted(names):
-        print('     ' + n)
+        if not n.startswith('www/'):
+            print('       ' + n)
     if problems:
         print('  [!] 发现问题:')
         for p in problems:
